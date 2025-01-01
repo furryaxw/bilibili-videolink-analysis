@@ -9,9 +9,9 @@
     "lib",
     "dist"
   ],
-  "homepage": "https://github.com/shangxueink/koishi-shangxue-apps/tree/main/",
+  "homepage": "https://github.com/furryaxw/bilibili-videolink-analysis",
   "bugs": {
-    "url": "https://github.com/shangxueink/koishi-shangxue-apps/issues"
+    "url": "https://github.com/furryaxw/bilibili-videolink-analysis/issues"
   },
   "keywords": [
     "chatbot",
