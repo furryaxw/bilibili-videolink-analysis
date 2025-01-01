@@ -1,5 +1,7 @@
 # koishi-plugin-bilibili-videolink-analysis
 
+本项目基于原项目0.6.3版本修改
+
 [![npm](https://img.shields.io/npm/v/koishi-plugin-bilibili-videolink-analysis?style=flat-square)](https://www.npmjs.com/package/koishi-plugin-bilibili-videolink-analysis)
 
 # Bilibili 视频链接解析插件说明 📺✨
