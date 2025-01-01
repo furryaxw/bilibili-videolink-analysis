@@ -9,6 +9,10 @@
     "lib",
     "dist"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/furryaxw/bilibili-videolink-analysis.git"
+  },
   "homepage": "https://github.com/furryaxw/bilibili-videolink-analysis",
   "bugs": {
     "url": "https://github.com/furryaxw/bilibili-videolink-analysis/issues"
