@@ -25,5 +25,8 @@
   "peerDependencies": {
     "koishi": "^4.16.8",
     "koishi-plugin-bilibili-login": "^0.1.50"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0-rc.12"
   }
 }

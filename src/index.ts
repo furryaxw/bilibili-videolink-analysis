@@ -1,25 +1,21 @@
-console.log('[share-links-analysis] DEBUG: Loading index.ts...');
-
 import { Context, Schema, h, Logger, Session } from 'koishi';
-
-console.log('[share-links-analysis] DEBUG: index.ts -> Importing core and types...');
 import { resolveLinks, processLink } from './core';
 import { ProcessedLink, PluginConfig } from './types';
 
 // 这是插件的元数据
-console.log('[share-links-analysis] DEBUG: index.ts -> Defining exports (name, inject, usage)...');
 export const name = 'share-links-analysis';
 export const inject = {
   required: ['BiliBiliVideo'],
+  optional: ['puppeteer'], // 【修改】将 puppeteer 作为可选依赖注入
 };
 
 export const usage = `
 开启插件后，即可自动解析分享链接
-向Bot发送B站等支持平台的分享链接，会返回图文信息与视频。
+向Bot发送B站、小红书等支持平台的分享链接，会返回图文信息与视频。
+
+B站短链接(b23.tv)解析需要 puppeteer 服务支持，请确保已安装并启用该插件。
 `;
 
-// 【修复】应用了与 MarkdownToImageService 相同的、更稳健的 Schema 声明方式
-console.log('[share-links-analysis] DEBUG: index.ts -> Defining Config schema...');
 export const Config: Schema<PluginConfig> = Schema.intersect([
   Schema.object({
     linktextParsing: Schema.boolean().default(true).description("是否返回图文数据。`开启后，才发送视频数据的图文解析。`"),
@@ -70,20 +66,17 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
 ]) as any;
 
 // 主插件逻辑
-console.log('[share-links-analysis] DEBUG: index.ts -> Defining apply() function...');
 export function apply(ctx: Context, config: PluginConfig) {
-  console.log('[share-links-analysis] DEBUG: apply() function EXECUTED.');
   const logger = ctx.logger('share-links-analysis');
   const lastProcessedUrls: Record<string, Record<string, number>> = {};
 
   ctx.middleware(async (session, next) => {
-    // 【修复】检查 content 和 channelId 是否存在
     if (!session.content || !session.channelId) {
       return next();
     }
 
     let content = session.content;
-    const channelId = session.channelId; // 现在 channelId 是 string 类型
+    const channelId = session.channelId;
 
     if (config.BVnumberParsing) {
       const bvPattern = /(?:^|\s)(BV[1-9A-HJ-NP-Za-km-z]{10})(?:\s|$)/g;
@@ -132,7 +125,6 @@ export function apply(ctx: Context, config: PluginConfig) {
   });
 }
 
-// 【修复】为 session 参数添加 Session 类型
 async function sendResult(session: Session, config: PluginConfig, result: ProcessedLink, logger: Logger) {
   if (config.linktextParsing && result.text) {
     let message = result.text;
@@ -174,5 +166,3 @@ async function sendResult(session: Session, config: PluginConfig, result: Proces
     logger.info(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
   }
 }
-
-console.log('[share-links-analysis] DEBUG: index.ts -> File loaded SUCCESSFULLY.');

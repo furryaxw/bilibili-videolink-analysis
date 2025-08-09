@@ -16,8 +16,9 @@ export interface ProcessedLink {
   sourceUrl?: string;
 }
 
-// 【新增】从 index.ts 移动过来的 Config 接口
+// 插件配置接口
 export interface PluginConfig {
+  // Bilibili & 通用配置
   linktextParsing: boolean;
   VideoParsing_ToLink: '1' | '2' | '3' | '4' | '5';
   Video_ClarityPriority: '1' | '2';
@@ -76,9 +77,10 @@ export interface BilibiliVideoInfo {
   };
 }
 
-// 解决 ctx.BiliBiliVideo 的类型报错
+// 解决 ctx.BiliBiliVideo 和 ctx.puppeteer 的类型报错
 declare module 'koishi' {
   interface Context {
     BiliBiliVideo: any;
+    puppeteer?: any; // 将 puppeteer 声明为可选服务
   }
 }
