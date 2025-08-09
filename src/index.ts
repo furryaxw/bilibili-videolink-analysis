@@ -83,6 +83,7 @@ export function apply(ctx: Context, config: PluginConfig) {
     }
 
     let content = session.content;
+    content = content.replace(/\\/g, '');
     const channelId = session.channelId;
 
     if (config.BVnumberParsing) {
