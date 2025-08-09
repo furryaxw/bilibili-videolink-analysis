@@ -1,0 +1,29 @@
+{
+  "name": "koishi-plugin-share-links-analysis",
+  "description": "自用插件",
+  "license": "MIT",
+  "version": "0.6.6",
+  "main": "lib/index.js",
+  "typings": "lib/index.d.ts",
+  "files": [
+    "lib",
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/furryaxw/sharelinks-analysis.git"
+  },
+  "homepage": "https://github.com/furryaxw/sharelinks-analysis",
+  "bugs": {
+    "url": "https://github.com/furryaxw/sharelinks-analysis/issues"
+  },
+  "keywords": [
+    "chatbot",
+    "koishi",
+    "plugin"
+  ],
+  "peerDependencies": {
+    "koishi": "^4.16.8",
+    "koishi-plugin-bilibili-login": "^0.1.50"
+  }
+}
