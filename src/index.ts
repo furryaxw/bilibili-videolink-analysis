@@ -30,20 +30,20 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
       Schema.const('1').description('低清晰度优先（低清晰度的视频发得快一点）'),
       Schema.const('2').description('高清晰度优先（建议在B站观看高画质视频）'),
     ]).role('radio').default('1').description("发送的视频清晰度优先策略"),
-    BVnumberParsing: Schema.boolean().default(true).description("是否允许根据`独立的BV号`解析视频 `开启后，可以通过视频的BV号解析视频。`"),
     Maximumduration: Schema.number().default(25).description("允许解析的视频最大时长（分钟）`超过这个时长就不会发送视频`").min(1),
     Maximumduration_tip: Schema.union([
       Schema.const('不返回文字提示').description('不返回文字提示'),
       Schema.string().description('返回文字提示（请在右侧填写文字内容）').default('视频太长啦！还是去B站看吧~'),
     ]).description("对过长视频的文字提示内容").default('视频太长啦！还是去B站看吧~'),
     MinimumTimeInterval: Schema.number().default(180).description("若干`秒`内不再处理相同链接 `防止多bot互相触发导致的刷屏/性能浪费`").min(1),
-  }).description("基础设置"),
-
-  Schema.object({
     waitTip_Switch: Schema.union([
       Schema.const(false).description('不返回文字提示'),
       Schema.string().description('返回文字提示（请在右侧填写文字内容）'),
     ]).description("是否返回等待提示。开启后，会发送`等待提示语`").default(false),
+  }).description("基础设置"),
+
+  Schema.object({
+    BVnumberParsing: Schema.boolean().default(true).description("是否允许根据`独立的BV号`解析视频 `开启后，可以通过视频的BV号解析视频。`"),
     parseLimit: Schema.number().default(3).description("单对话多链接解析上限").hidden(),
     useNumeral: Schema.boolean().default(true).description("使用格式化数字 (如 10000 -> 1万)").hidden(),
     showError: Schema.boolean().default(false).description("当链接不正确时提醒发送者").hidden(),
@@ -57,7 +57,14 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
     bVideoStat: Schema.boolean().default(true).description("显示状态（*三连数据*）"),
     bVideoExtraStat: Schema.boolean().default(true).description("显示额外状态（*弹幕&观看*）"),
     bVideoShowLink: Schema.boolean().default(false).description("显示视频链接`开启可能会导致其他bot循环解析`"),
-  }).description("内容解析设置"),
+  }).description("B站内容解析设置"),
+
+  Schema.object({
+    xhsCover: Schema.boolean().default(true).description("显示首图/封面"),
+    xhsAuthor: Schema.boolean().default(true).description("显示作者"),
+    xhsDesc: Schema.boolean().default(true).description("显示简介"),
+    xhsStat: Schema.boolean().default(true).description("显示状态（*点赞、收藏、评论*）"),
+  }).description("小红书内容解析设置"),
 
   Schema.object({
     userAgent: Schema.string().description("所有 API 请求所用的 User-Agent").default("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),

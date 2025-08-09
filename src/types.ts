@@ -39,6 +39,12 @@ export interface PluginConfig {
   bVideoShowLink: boolean;
   userAgent: string;
   loggerinfo: boolean;
+
+  // 小红书配置项
+  xhsCover: boolean;
+  xhsDesc: boolean;
+  xhsAuthor: boolean;
+  xhsStat: boolean;
 }
 
 // Bilibili API 返回的视频信息类型定义 (部分)
@@ -83,4 +89,50 @@ declare module 'koishi' {
     BiliBiliVideo: any;
     puppeteer?: any; // 将 puppeteer 声明为可选服务
   }
+}
+
+// 为小红书笔记数据定义更详细的类型接口
+export interface XhsImageInfo {
+  imageScene: string;
+  url: string;
+}
+
+export interface XhsImage {
+  infoList: XhsImageInfo[];
+  url_default: string;
+}
+
+export interface XhsNoteData {
+  title: string;
+  desc: string;
+  type: 'video' | 'normal';
+  user: {
+    nickname: string;
+    avatar: string;
+  };
+  interactInfo: {
+    likedCount: string;
+    collectedCount: string;
+    commentCount: string;
+    shareCount: string;
+  };
+  imageList?: XhsImage[];
+  video?: {
+    media: {
+      duration: number;
+      stream: {
+        h264: { masterUrl: string }[];
+      };
+    };
+  };
+}
+
+export interface XhsInitialState {
+  note: {
+    noteDetailMap: {
+      [key: string]: {
+        note: XhsNoteData;
+      };
+    };
+  };
 }
