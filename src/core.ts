@@ -1,5 +1,7 @@
+// src/core.ts
+
 import { Context } from 'koishi';
-import {Link, PluginConfig, ProcessedLink} from './types';
+import { Link, PluginConfig, ParsedInfo } from './types'; // 【修改】导入 ParsedInfo
 import * as Bilibili from './parsers/bilibili';
 import * as Xiaohongshu from './parsers/xiaohongshu';
 
@@ -27,7 +29,7 @@ export function resolveLinks(content: string): Link[] {
  * @param link 解析出的链接对象
  * @returns 处理后的链接结果，如果失败则返回 null
  */
-export async function processLink(ctx: Context, config: PluginConfig, link: Link): Promise<ProcessedLink | null> {
+export async function processLink(ctx: Context, config: PluginConfig, link: Link): Promise<ParsedInfo | null> {
   for (const parser of parsers) {
     // 检查这个解析器是否能处理此类型的链接
     if (parser.match(link.url).length > 0) {

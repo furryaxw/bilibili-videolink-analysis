@@ -8,43 +8,43 @@ export interface Link {
   url: string;
 }
 
-// 定义处理后返回给主逻辑的统一格式
-export interface ProcessedLink {
-  text: string;
-  videoUrl: string | null;
-  duration: number | null;
-  sourceUrl?: string;
+// 定义解析器处理后返回的统一结构化数据格式
+export interface ParsedInfo {
+  platform: 'bilibili' | 'xiaohongshu';
+  title: string;
+  authorName: string;
+  description?: string;
+  coverUrl?: string;
+  videoUrl?: string | null;
+  duration?: number | null;
+  sourceUrl: string;
+  stats: string;
+  images?: string[];
 }
 
 // 插件配置接口
 export interface PluginConfig {
-  // Bilibili & 通用配置
-  linktextParsing: boolean;
-  VideoParsing_ToLink: '1' | '2' | '3' | '4' | '5';
+  // 通用配置
   Video_ClarityPriority: '1' | '2';
-  BVnumberParsing: boolean;
   Maximumduration: number;
   Maximumduration_tip: string;
   MinimumTimeInterval: number;
   waitTip_Switch: false | string;
+
+  // 格式化配置
+  format: string; // 【恢复】主格式化模板
+  bilibiliStatsFormat: string; // 【新增】B站数据统计格式
+  xiaohongshuStatsFormat: string; // 【新增】小红书数据统计格式
+
+  // 高级设置
   parseLimit: number;
   useNumeral: boolean;
   showError: boolean;
   bVideoIDPreference: 'bv' | 'av';
-  bVideoImage: boolean;
-  bVideoOwner: boolean;
-  bVideoDesc: boolean;
-  bVideoStat: boolean;
-  bVideoExtraStat: boolean;
-  bVideoShowLink: boolean;
-  userAgent: string;
-  loggerinfo: boolean;
 
-  // 小红书配置项
-  xhsCover: boolean;
-  xhsDesc: boolean;
-  xhsAuthor: boolean;
-  xhsStat: boolean;
+  // 调试设置
+  userAgent: string;
+  logLevel: 'none' | 'link_only' | 'full'; // 【新增】日志等级替换原布尔值
 }
 
 // Bilibili API 返回的视频信息类型定义 (部分)
@@ -87,7 +87,7 @@ export interface BilibiliVideoInfo {
 declare module 'koishi' {
   interface Context {
     BiliBiliVideo: any;
-    puppeteer?: any; // 将 puppeteer 声明为可选服务
+    puppeteer?: any;
   }
 }
 
