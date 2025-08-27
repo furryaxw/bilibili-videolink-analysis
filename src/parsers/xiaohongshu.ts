@@ -147,10 +147,14 @@ export async function process(ctx: Context, config: PluginConfig, link: Link): P
       });
     }
 
+    const likedCount = noteData.interactInfo?.likedCount ?? '-1';
+    const collectedCount = noteData.interactInfo?.collectedCount ?? '-1';
+    const commentCount = noteData.interactInfo?.commentCount ?? '-1';
+
     const stats = {
-        '点赞': numeral(parseInt(noteData.interactInfo.likedCount), config),
-        '收藏': numeral(parseInt(noteData.interactInfo.collectedCount), config),
-        '评论': numeral(parseInt(noteData.interactInfo.commentCount), config),
+      '点赞': numeral(parseInt(likedCount), config),
+      '收藏': numeral(parseInt(collectedCount), config),
+      '评论': numeral(parseInt(commentCount), config),
     };
     let statsString = config.xiaohongshuStatsFormat;
     (Object.keys(stats) as Array<keyof typeof stats>).forEach(key => {
