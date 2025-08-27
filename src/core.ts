@@ -1,6 +1,6 @@
 // src/core.ts
 
-import { Context } from 'koishi';
+import { Context, Session } from 'koishi';
 import { Link, PluginConfig, ParsedInfo } from './types'; // 【修改】导入 ParsedInfo
 import * as Bilibili from './parsers/bilibili';
 import * as Xiaohongshu from './parsers/xiaohongshu';
@@ -27,13 +27,13 @@ export function resolveLinks(content: string): Link[] {
  * @param ctx Koishi Context
  * @param config 插件配置
  * @param link 解析出的链接对象
+ * @param session 当前会话对象
  * @returns 处理后的链接结果，如果失败则返回 null
  */
-export async function processLink(ctx: Context, config: PluginConfig, link: Link): Promise<ParsedInfo | null> {
+export async function processLink(ctx: Context, config: PluginConfig, link: Link, session: Session): Promise<ParsedInfo | null> {
   for (const parser of parsers) {
-    // 检查这个解析器是否能处理此类型的链接
     if (parser.match(link.url).length > 0) {
-      return await parser.process(ctx, config, link);
+      return await parser.process(ctx, config, link, session);
     }
   }
   return null;

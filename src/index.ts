@@ -3,11 +3,12 @@
 import { Context, Schema, h, Logger, Session } from 'koishi';
 import { resolveLinks, processLink } from './core';
 import { ParsedInfo, PluginConfig } from './types';
+import { refreshXhsCookie } from './parsers/xiaohongshu';
 
 export const name = 'share-links-analysis';
 export const inject = {
-  required: ['BiliBiliVideo'],
-  optional: ['puppeteer'],
+  required: ['BiliBiliVideo', 'database', 'puppeteer'],
+  optional: [],
 };
 
 export const usage = `
@@ -72,8 +73,27 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
 ]) as any;
 
 export function apply(ctx: Context, config: PluginConfig) {
+  ctx.model.extend('sla_cookie_cache', {
+    platform: 'string', // 平台名称，如 'xiaohongshu'
+    cookie: 'text',   // 存储的 cookie 字符串
+  }, {
+    primary: 'platform' // 使用平台名称作为主键
+  });
+
   const logger = ctx.logger('share-links-analysis');
   const lastProcessedUrls: Record<string, Record<string, number>> = {};
+
+  ctx.on('ready', async () => {
+    logger.info('插件已启动，执行一次初始的小红书 Cookie 刷新...');
+    await refreshXhsCookie(ctx, config);
+
+    // 设置一个定时器，每隔 12 小时刷新一次 Cookie
+    // 24 * 60 * 60 * 1000 = 24小时
+    // 12 * 60 * 60 * 1000 = 12小时
+    ctx.setInterval(async () => {
+      await refreshXhsCookie(ctx, config);
+    }, 24 * 60 * 60 * 1000);
+  });
 
   ctx.middleware(async (session, next) => {
     if (!session.content || !session.channelId) return next();
@@ -102,7 +122,7 @@ export function apply(ctx: Context, config: PluginConfig) {
         await session.send(config.waitTip_Switch);
       }
 
-      const result = await processLink(ctx, config, link);
+      const result = await processLink(ctx, config, link, session);
 
       if (result) {
         lastProcessedUrls[channelId][link.url] = now;

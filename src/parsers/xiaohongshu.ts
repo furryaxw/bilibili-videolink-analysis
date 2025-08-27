@@ -1,7 +1,8 @@
 // src/parsers/xiaohongshu.ts
 
-import {Context} from 'koishi';
+import {Context, Session} from 'koishi';
 import {Link, ParsedInfo, PluginConfig, XhsInitialState} from '../types';
+import { Cookie } from 'puppeteer';
 import {load} from 'cheerio';
 import {numeral} from '../utils';
 
@@ -24,14 +25,66 @@ export function match(content: string): Link[] {
 }
 
 /**
+ * 使用 Puppeteer 刷新小红书 Cookie 并存入数据库
+ * @param ctx - Koishi Context
+ */
+export async function refreshXhsCookie(ctx: Context, config: PluginConfig): Promise<boolean> {
+  const logger = ctx.logger('share-links-analysis:xiaohongshu');
+  const platformId = 'xiaohongshu';
+
+  if (!ctx.puppeteer) {
+    logger.warn('Puppeteer 服务未启用，无法自动刷新 Cookie。');
+    return false;
+  }
+
+  logger.info('正在尝试使用 Puppeteer 自动刷新小红书 Cookie...');
+  try {
+    const page = await ctx.puppeteer.page();
+    await page.setUserAgent(config.userAgent);
+
+    try {
+      await page.goto('https://www.xiaohongshu.com', {
+        waitUntil: 'domcontentloaded',
+        timeout: 10000
+      });
+    } catch (error) {
+      logger.error('Puppeteer 访问小红书首页时发生错误:', error);
+    }
+
+    // 获取页面上的所有 Cookie
+    const cookies = await page.cookies();
+    if (cookies.length === 0) {
+      logger.warn('Puppeteer 访问了页面，但未能获取到任何 Cookie。');
+      await page.close();
+      return false;
+    }
+
+    // 将 Cookie 数组格式化为可用的字符串
+    const cookieString = cookies.map((c: Cookie) => `${c.name}=${c.value}`).join('; ');
+
+    // 将新 Cookie 存入数据库
+    await ctx.database.upsert('sla_cookie_cache', [{ platform: platformId, cookie: cookieString }]);
+
+    logger.info('成功使用 Puppeteer 刷新并缓存了小红书 Cookie！');
+    await page.close();
+    return true;
+  } catch (error) {
+    logger.error('使用 Puppeteer 刷新 Cookie 时发生错误: ', error);
+    return false;
+  }
+}
+
+/**
  * 处理单个小红书链接
  * @param ctx Koishi Context
  * @param config 插件配置
  * @param link 匹配到的链接对象
+ * @param session
  * @returns 处理后的标准格式对象
  */
-export async function process(ctx: Context, config: PluginConfig, link: Link): Promise<ParsedInfo | null> {
+export async function process(ctx: Context, config: PluginConfig, link: Link, session: Session): Promise<ParsedInfo | null> {
   const logger = ctx.logger('share-links-analysis:xiaohongshu');
+  const platformId = 'xiaohongshu';
 
   // 步骤一：从原始分享链接中提取 xsec_token
   let token: string | null = null;
@@ -55,16 +108,11 @@ export async function process(ctx: Context, config: PluginConfig, link: Link): P
   if (link.url.includes('xhslink.com')) {
     if (config.logLevel === 'full') logger.info(`小红书短链接解析：尝试获取 ${link.url} 的最终地址`);
     try {
-      const response = await ctx.http(link.url, {
+      await ctx.http(link.url, {
         method: 'GET',
         headers: { 'User-Agent': config.userAgent },
         redirect: 'manual',
       });
-      const location = response.headers.get('location');
-      if (location) {
-        finalUrl = location;
-        if (config.logLevel === 'full') logger.info(`短链接解析成功，跳转地址: ${finalUrl}`);
-      }
     } catch (e: any) {
         const location = e.response?.headers?.location;
         if (location) {
@@ -82,12 +130,10 @@ export async function process(ctx: Context, config: PluginConfig, link: Link): P
   try {
     const baseUrl = finalUrl.split('?')[0];
     if (token) {
-      // 如果有token，构建一个只带token的纯净URL
       const targetUrl = new URL(baseUrl);
       targetUrl.searchParams.set('xsec_token', token);
       urlToFetch = targetUrl.toString();
     } else {
-      // 【修正】如果没有token，则直接尝试访问原始最终链接
       urlToFetch = finalUrl;
     }
   } catch(e) {
@@ -97,10 +143,23 @@ export async function process(ctx: Context, config: PluginConfig, link: Link): P
 
   if (config.logLevel === 'full') logger.info(`正在抓取小红书页面: ${urlToFetch}`);
   try {
-    const html = await ctx.http.get<string>(urlToFetch, {
-      headers: { 'User-Agent': config.userAgent }
-    });
-    const $ = load(html);
+    const dbCache = await ctx.database.get('sla_cookie_cache', platformId);
+    let currentCookie = (dbCache && dbCache.length > 0) ? dbCache[0].cookie : '';
+    const requestHeaders: Record<string, string> = {
+      'User-Agent': config.userAgent,
+    };
+    if (currentCookie) {
+      requestHeaders['Cookie'] = currentCookie;
+    } else {
+      logger.warn('警告！没有找到缓存的小红书cookie');
+      await session.send("小红书 Cookie 未配置或自动刷新失败，无法解析链接。请联系管理员。");
+    }
+
+    const fullResponse = await ctx.http(urlToFetch, { method: 'GET', headers: requestHeaders });
+
+    const responseHtml = fullResponse.data;
+
+    const $ = load(responseHtml);
     const scriptContent = $('script:contains("window.__INITIAL_STATE__")').html();
 
     if (!scriptContent) {
@@ -116,6 +175,8 @@ export async function process(ctx: Context, config: PluginConfig, link: Link): P
         return null;
     }
     const noteData = pageData.note.noteDetailMap[noteKey].note;
+
+    logger.error(pageData.note);
 
     // --- 构建结构化数据 ---
     let videoUrl: string | null = null;
@@ -147,14 +208,10 @@ export async function process(ctx: Context, config: PluginConfig, link: Link): P
       });
     }
 
-    const likedCount = noteData.interactInfo?.likedCount ?? '-1';
-    const collectedCount = noteData.interactInfo?.collectedCount ?? '-1';
-    const commentCount = noteData.interactInfo?.commentCount ?? '-1';
-
     const stats = {
-      '点赞': numeral(parseInt(likedCount), config),
-      '收藏': numeral(parseInt(collectedCount), config),
-      '评论': numeral(parseInt(commentCount), config),
+        '点赞': numeral(parseInt(noteData.interactInfo.likedCount), config),
+        '收藏': numeral(parseInt(noteData.interactInfo.collectedCount), config),
+        '评论': numeral(parseInt(noteData.interactInfo.commentCount), config),
     };
     let statsString = config.xiaohongshuStatsFormat;
     (Object.keys(stats) as Array<keyof typeof stats>).forEach(key => {

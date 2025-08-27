@@ -1,6 +1,6 @@
 // src/parsers/bilibili.ts
 
-import { Context } from 'koishi';
+import {Context, Session} from 'koishi';
 import { Link, ParsedInfo, PluginConfig, BilibiliVideoInfo } from '../types';
 import { numeral } from '../utils';
 
@@ -54,9 +54,10 @@ export function match(content: string): Link[] {
  * @param ctx Koishi Context
  * @param config 插件配置
  * @param link 匹配到的链接对象
+ * @param session
  * @returns 处理后的标准格式对象
  */
-export async function process(ctx: Context, config: PluginConfig, link: Link): Promise<ParsedInfo | null> {
+export async function process(ctx: Context, config: PluginConfig, link: Link, session: Session): Promise<ParsedInfo | null> {
   const logger = ctx.logger('share-links-analysis:bilibili');
   let videoId = link.id;
   let videoIdType = link.type;

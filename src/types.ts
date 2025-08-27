@@ -1,5 +1,7 @@
 // src/types.ts
 
+let session_global;
+
 // 定义解析出的链接基本信息
 export interface Link {
   platform: 'bilibili' | 'xiaohongshu';
@@ -88,6 +90,12 @@ declare module 'koishi' {
   interface Context {
     BiliBiliVideo: any;
     puppeteer?: any;
+  }
+  interface Tables {
+    sla_cookie_cache: {
+      platform: string;
+      cookie: string;
+    }
   }
 }
 
