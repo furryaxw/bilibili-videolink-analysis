@@ -2,7 +2,7 @@
 
 import {Context, Session} from 'koishi';
 import {Link, ParsedInfo, PluginConfig, XhsInitialState} from '../types';
-import { Cookie } from 'puppeteer';
+import { Cookie, Page } from 'puppeteer';
 import {load} from 'cheerio';
 import {numeral} from '../utils';
 
@@ -37,44 +37,66 @@ export async function refreshXhsCookie(ctx: Context, config: PluginConfig): Prom
     return false;
   }
 
-  logger.info('正在尝试使用 Puppeteer 自动刷新小红书 Cookie...');
+  logger.info('正在执行两步导航策略以刷新小红书 Cookie...');
+  let page: Page | null = null;
   try {
-    const page = await ctx.puppeteer.page();
+    page = await ctx.puppeteer.page();
     await page.setUserAgent(config.userAgent);
 
+    // --- 步骤 1: 访问首页，获取基础会话 Cookie (如 web_session) ---
+    logger.info('步骤 1/2: 访问首页以获取初始会话 Cookie...');
     try {
-      await page.goto('https://www.xiaohongshu.com', {
-        waitUntil: 'domcontentloaded',
-        timeout: 10000
-      });
-      await page.goto('https://www.xiaohongshu.com/explore', {
-        waitUntil: 'domcontentloaded',
+      await page.goto('https://www.xiaohongshu.com/', {
+        waitUntil: 'load',
         timeout: 10000
       });
     } catch (error) {
-      logger.error('Puppeteer 访问小红书首页时发生错误:', error);
+    }
+    const initialCookies = await page.cookies();
+    logger.info(`步骤 1 完成, 获取到 ${initialCookies.length} 个初始 Cookie。`);
+
+    // --- 步骤 2: 访问 /explore 页面，触发反爬虫验证，获取安全 Cookie (如 acw_tc) ---
+    logger.info('步骤 2/2: 访问 /explore 页面以触发并获取安全 Cookie...');
+    try {
+      await page.goto('https://www.xiaohongshu.com/explore', {
+        waitUntil: 'load',
+        timeout: 10000
+      });
+    } catch (error) {
     }
 
-    // 获取页面上的所有 Cookie
-    const cookies = await page.cookies();
-    if (cookies.length === 0) {
-      logger.warn('Puppeteer 访问了页面，但未能获取到任何 Cookie。');
-      await page.close();
+    // --- 步骤 3: 收集并验证最终合并的 Cookie ---
+    const finalCookies = await page.cookies();
+    if (finalCookies.length === 0) {
+      logger.warn('执行两步导航后，仍未能获取到任何 Cookie。');
       return false;
     }
 
-    // 将 Cookie 数组格式化为可用的字符串
-    const cookieString = cookies.map((c: Cookie) => `${c.name}=${c.value}`).join('; ');
+    const hasWebSession = finalCookies.some((c: Cookie) => c.name === 'web_session');
+    const hasAcwTc = finalCookies.some((c: Cookie) => c.name === 'acw_tc');
+    const hasABRequestId = finalCookies.some((c: Cookie) => c.name === 'abRequestId');
 
-    // 将新 Cookie 存入数据库
+    logger.info(`步骤 2 完成, 共获取到 ${finalCookies.length} 个最终 Cookie。`);
+    logger.info(`- 是否包含 'web_session': ${hasWebSession ? '是' : '否'}`);
+    logger.info(`- 是否包含 'acw_tc': ${hasAcwTc ? '是' : '否'}`);
+    logger.info(`- 是否包含 'abRequestId': ${hasABRequestId ? '是' : '否'}`);
+
+    if (!hasWebSession || !hasAcwTc || !hasABRequestId) {
+      logger.warn('关键 Cookie 缺失，本次刷新可能不完整。仍将尝试保存。');
+    }
+
+    const cookieString = finalCookies.map((c: Cookie) => `${c.name}=${c.value}`).join('; ');
     await ctx.database.upsert('sla_cookie_cache', [{ platform: platformId, cookie: cookieString }]);
 
-    logger.info('成功使用 Puppeteer 刷新并缓存了小红书 Cookie！');
-    await page.close();
+    logger.info('成功执行两步刷新策略并缓存了小红书 Cookie！');
     return true;
   } catch (error) {
-    logger.error('使用 Puppeteer 刷新 Cookie 时发生错误: ', error);
+    logger.error('在执行两步导航刷新 Cookie 时发生错误: ', error);
     return false;
+  } finally {
+    if (page) {
+      await page.close();
+    }
   }
 }
 
