@@ -47,6 +47,10 @@ export async function refreshXhsCookie(ctx: Context, config: PluginConfig): Prom
         waitUntil: 'domcontentloaded',
         timeout: 10000
       });
+      await page.goto('https://www.xiaohongshu.com/explore', {
+        waitUntil: 'domcontentloaded',
+        timeout: 10000
+      });
     } catch (error) {
       logger.error('Puppeteer 访问小红书首页时发生错误:', error);
     }
@@ -175,8 +179,6 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
         return null;
     }
     const noteData = pageData.note.noteDetailMap[noteKey].note;
-
-    logger.error(pageData.note);
 
     // --- 构建结构化数据 ---
     let videoUrl: string | null = null;
