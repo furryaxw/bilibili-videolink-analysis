@@ -27,6 +27,7 @@ export function match(content: string): Link[] {
 /**
  * 使用 Puppeteer 刷新小红书 Cookie 并存入数据库
  * @param ctx - Koishi Context
+ * @param config
  */
 export async function refreshXhsCookie(ctx: Context, config: PluginConfig): Promise<boolean> {
   const logger = ctx.logger('share-links-analysis:xiaohongshu');
@@ -55,7 +56,7 @@ export async function refreshXhsCookie(ctx: Context, config: PluginConfig): Prom
     const initialCookies = await page.cookies();
     logger.info(`步骤 1 完成, 获取到 ${initialCookies.length} 个初始 Cookie。`);
 
-    // --- 步骤 2: 访问 /explore 页面，触发反爬虫验证，获取安全 Cookie (如 acw_tc) ---
+    // --- 步骤 2: 访问 /explore 页面，触发反爬虫验证，获取安全 Cookie ---
     logger.info('步骤 2/2: 访问 /explore 页面以触发并获取安全 Cookie...');
     try {
       await page.goto('https://www.xiaohongshu.com/explore', {
@@ -73,19 +74,22 @@ export async function refreshXhsCookie(ctx: Context, config: PluginConfig): Prom
     }
 
     const hasWebSession = finalCookies.some((c: Cookie) => c.name === 'web_session');
-    const hasAcwTc = finalCookies.some((c: Cookie) => c.name === 'acw_tc');
     const hasABRequestId = finalCookies.some((c: Cookie) => c.name === 'abRequestId');
 
     logger.info(`步骤 2 完成, 共获取到 ${finalCookies.length} 个最终 Cookie。`);
     logger.info(`- 是否包含 'web_session': ${hasWebSession ? '是' : '否'}`);
-    logger.info(`- 是否包含 'acw_tc': ${hasAcwTc ? '是' : '否'}`);
     logger.info(`- 是否包含 'abRequestId': ${hasABRequestId ? '是' : '否'}`);
 
-    if (!hasWebSession || !hasAcwTc || !hasABRequestId) {
-      logger.warn('关键 Cookie 缺失，本次刷新可能不完整。仍将尝试保存。');
+    if (!hasWebSession || !hasABRequestId) {
+      logger.warn('关键 Cookie 缺失，本次刷新可能不完整。将放弃刷新。');
+      return false;
     }
 
-    const cookieString = finalCookies.map((c: Cookie) => `${c.name}=${c.value}`).join('; ');
+    // 在这里过滤掉 acw_tc
+    const filteredCookies = finalCookies.filter((c: Cookie) => c.name !== 'acw_tc');
+
+    // 使用过滤后的 cookie 数组来生成字符串
+    const cookieString = filteredCookies.map((c: Cookie) => `${c.name}=${c.value}`).join('; ');
     await ctx.database.upsert('sla_cookie_cache', [{ platform: platformId, cookie: cookieString }]);
 
     logger.info('成功执行两步刷新策略并缓存了小红书 Cookie！');

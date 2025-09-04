@@ -86,13 +86,6 @@ export function apply(ctx: Context, config: PluginConfig) {
   ctx.on('ready', async () => {
     logger.info('插件已启动，执行一次初始的小红书 Cookie 刷新...');
     await refreshXhsCookie(ctx, config);
-
-    // 设置一个定时器，每隔 12 小时刷新一次 Cookie
-    // 24 * 60 * 60 * 1000 = 24小时
-    // 12 * 60 * 60 * 1000 = 12小时
-    ctx.setInterval(async () => {
-      await refreshXhsCookie(ctx, config);
-    }, 24 * 60 * 60 * 1000);
   });
 
   ctx.middleware(async (session, next) => {
