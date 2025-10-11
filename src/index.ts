@@ -128,32 +128,41 @@ export function apply(ctx: Context, config: PluginConfig) {
   });
 }
 
+function escapeHtml(str: string) {
+  if (!str) return '';
+  return str.replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 async function sendResult(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
   let message = config.format;
 
-  message = message.replace(/{title}/g, result.title || '');
-  message = message.replace(/{authorName}/g, result.authorName || '');
-  message = message.replace(/{description}/g, result.description ? result.description : '');
-  message = message.replace(/{sourceUrl}/g, result.sourceUrl || '');
+  // 对所有文本内容进行 HTML 转义
+  message = message.replace(/{title}/g, escapeHtml(result.title || ''));
+  message = message.replace(/{authorName}/g, escapeHtml(result.authorName || ''));
+  message = message.replace(/{description}/g, escapeHtml(result.description ? result.description : ''));
+  message = message.replace(/{sourceUrl}/g, escapeHtml(result.sourceUrl || ''));
   message = message.replace(/{cover}/g, result.coverUrl ? h.image(result.coverUrl).toString() : '');
 
   const imagesText = result.images ? result.images.map(img => h.image(img).toString()).join('\n') : '';
   message = message.replace(/{images}/g, imagesText);
 
-  message = message.replace(/{stats}/g, result.stats || '');
+  message = message.replace(/{stats}/g, escapeHtml(result.stats || ''));
 
   // 【修复】只要 videoUrl 存在就处理，仅当 duration 明确超长时才替换为提示
   if (result.videoUrl) {
     // 仅当 duration 是有效数字且超长时，才显示提示
     if (typeof result.duration === 'number' && result.duration > config.Maximumduration * 60) {
-      const tip = config.Maximumduration_tip || '';
+      const tip = escapeHtml(config.Maximumduration_tip || '');
       message = message.replace(/{video}/g, tip);
       message = message.replace(/{videoUrl}/g, '');
     } else {
       // 正常发送视频和链接
       message = message.replace(/{video}/g, h.video(result.videoUrl).toString());
-      message = message.replace(/{videoUrl}/g, result.videoUrl);
+      message = message.replace(/{videoUrl}/g, escapeHtml(result.videoUrl));
       if (config.logLevel === 'link_only' || config.logLevel === 'full') {
         logger.info(`视频直链 (${result.platform}): ${result.videoUrl}`);
       }
@@ -164,6 +173,7 @@ async function sendResult(session: Session, config: PluginConfig, result: Parsed
     message = message.replace(/{videoUrl}/g, '');
   }
 
+  // 过滤空行，保留含有 < 的行（如图片、视频标签）
   const cleanMessage = message.split('\n').filter(line => line.trim() !== '' || line.includes('<')).join('\n');
 
   if (cleanMessage) {
