@@ -141,12 +141,25 @@ function escapeHtml(str: string) {
 
 async function sendResult(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
   if (config.useForward) {
-    return sendResult_forward(session, config, result, logger)
-  } else
-    return sendResult_plain(session, config, result, logger)
+    try {
+      await sendResult_forward(session, config, result, logger);
+      return; // 成功，结束
+    } catch (err) {
+      logger.warn('合并转发失败，回退到普通消息:', err);
+      await sendResult_plain(session, config, result, logger);
+      return;
+    }
+  } else {
+    await sendResult_plain(session, config, result, logger);
+    return;
+  }
 }
 
 async function sendResult_plain(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
+  if (config.logLevel === 'full') {
+    logger.info('进入普通消息发送');
+  }
+
   let message = config.format;
 
   // 对所有文本内容进行 HTML 转义
@@ -195,6 +208,10 @@ async function sendResult_plain(session: Session, config: PluginConfig, result: 
 }
 
 async function sendResult_forward(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
+  if (config.logLevel === 'full') {
+    logger.info('进入合并转发发送');
+  }
+
   let message = config.format;
 
   // Step 1: 替换纯文本字段
@@ -305,23 +322,17 @@ async function sendResult_forward(session: Session, config: PluginConfig, result
   if (forwardNodes.length === 0) return;
 
   // Step 6: 发送合并转发
-  try {
-    if (!(session.onebot && session.onebot._request)) throw new Error("onebot is not defined");
-    await session.onebot._request('send_group_forward_msg', {
-      group_id: session.guildId,
-      messages: forwardNodes,
-      news: [{text: result.description || ''}],
-      prompt: result.title || '',
-      summary: 'Powered by furryaxw',
-      source: result.title || ''
-    });
+  if (!(session.onebot && session.onebot._request)) throw new Error("onebot is not defined");
+  await session.onebot._request('send_group_forward_msg', {
+    group_id: session.guildId,
+    messages: forwardNodes,
+    news: [{text: result.description || ''}],
+    prompt: result.title || '',
+    summary: 'Powered by furryaxw',
+    source: result.title || ''
+  });
 
-    if (config.logLevel === 'full') {
-      logger.info(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
-    }
-  } catch (err) {
-    logger.warn('合并转发发送失败:', err);
-    // 失败时回退到普通消息
-    await sendResult_plain(session, config, result, logger)
+  if (config.logLevel === 'full') {
+    logger.info(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
   }
 }
