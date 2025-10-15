@@ -1,9 +1,10 @@
 // src/index.ts
 
-import { Context, Schema, h, Logger, Session } from 'koishi';
-import { resolveLinks, processLink } from './core';
-import { ParsedInfo, PluginConfig } from './types';
-import { refreshXhsCookie } from './parsers/xiaohongshu';
+import {Context, Schema, h, Logger, Session} from 'koishi';
+import {resolveLinks, processLink} from './core';
+import {ParsedInfo, PluginConfig} from './types';
+import {refreshXhsCookie} from './parsers/xiaohongshu';
+import {} from 'koishi-plugin-adapter-onebot'
 
 export const name = 'share-links-analysis';
 export const inject = {
@@ -31,11 +32,12 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
       Schema.const(false).description('不返回文字提示'),
       Schema.string().description('返回文字提示'),
     ]).description("是否返回等待提示。开启后，会发送`等待提示语`").default(false),
+    useForward: Schema.boolean().default(false).description("使用合并转发(强依赖Napcat，其他环境未测试)"),
   }).description("基础设置"),
 
   Schema.object({
     format: Schema.string().role('textarea').default(
-`{title}
+      `{title}
 {cover}
 作者：{authorName}
 简介：{description}
@@ -47,9 +49,9 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
 
   Schema.object({
     bilibiliStatsFormat: Schema.string().role('textarea').default('播放: {播放} | 弹幕: {弹幕} | 点赞: {点赞} | 硬币: {硬币} | 收藏: {收藏}')
-        .description('Bilibili 链接的数据统计格式。<br/>可用占位符: `{播放}`, `{弹幕}`, `{点赞}`, `{硬币}`, `{收藏}`'),
+      .description('Bilibili 链接的数据统计格式。<br/>可用占位符: `{播放}`, `{弹幕}`, `{点赞}`, `{硬币}`, `{收藏}`'),
     xiaohongshuStatsFormat: Schema.string().role('textarea').default('点赞: {点赞} | 收藏: {收藏} | 评论: {评论}')
-        .description('小红书链接的数据统计格式。<br/>可用占位符: `{点赞}`, `{收藏}`, `{评论}`'),
+      .description('小红书链接的数据统计格式。<br/>可用占位符: `{点赞}`, `{收藏}`, `{评论}`'),
   }).description("数据格式化"),
 
   Schema.object({
@@ -65,9 +67,9 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
   Schema.object({
     userAgent: Schema.string().description("所有 API 请求所用的 User-Agent").default("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
     logLevel: Schema.union([
-        Schema.const('none').description('不记录'),
-        Schema.const('link_only').description('仅记录视频直链'),
-        Schema.const('full').description('记录完整调试信息'),
+      Schema.const('none').description('不记录'),
+      Schema.const('link_only').description('仅记录视频直链'),
+      Schema.const('full').description('记录完整调试信息'),
     ]).role('radio').default('none').description("选择后台日志记录等级"),
   }).description("调试设置"),
 ]) as any;
@@ -107,7 +109,7 @@ export function apply(ctx: Context, config: PluginConfig) {
       const now = Date.now();
       if (!lastProcessedUrls[channelId]) lastProcessedUrls[channelId] = {};
       if (now - (lastProcessedUrls[channelId][link.url] || 0) < config.MinimumTimeInterval * 1000) {
-        if(config.logLevel === 'full') logger.info(`链接 ${link.url} 在冷却时间内，跳过处理。`);
+        if (config.logLevel === 'full') logger.info(`链接 ${link.url} 在冷却时间内，跳过处理。`);
         continue;
       }
 
@@ -138,6 +140,13 @@ function escapeHtml(str: string) {
 }
 
 async function sendResult(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
+  if (config.useForward) {
+    return sendResult_forward(session, config, result, logger)
+  } else
+    return sendResult_plain(session, config, result, logger)
+}
+
+async function sendResult_plain(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
   let message = config.format;
 
   // 对所有文本内容进行 HTML 转义
@@ -182,5 +191,137 @@ async function sendResult(session: Session, config: PluginConfig, result: Parsed
 
   if (config.logLevel === 'full') {
     logger.info(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
+  }
+}
+
+async function sendResult_forward(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
+  let message = config.format;
+
+  // Step 1: 替换纯文本字段
+  message = message.replace(/{title}/g, escapeHtml(result.title || ''));
+  message = message.replace(/{authorName}/g, escapeHtml(result.authorName || ''));
+  message = message.replace(/{description}/g, escapeHtml(result.description || ''));
+  message = message.replace(/{sourceUrl}/g, escapeHtml(result.sourceUrl || ''));
+  message = message.replace(/{stats}/g, escapeHtml(result.stats || ''));
+
+  // Step 2: 检查是否包含视频占位符
+  const hasVideoInTemplate = message.includes('{video}');
+
+  // Step 3: 构建富媒体映射
+  const mediaMap: Record<string, any[]> = {};
+
+  // 处理封面
+  if (result.coverUrl) {
+    mediaMap['{cover}'] = [{type: 'image', data: {file: result.coverUrl}}];
+  } else {
+    mediaMap['{cover}'] = [];
+  }
+
+  // 处理图片列表
+  if (result.images && result.images.length > 0) {
+    mediaMap['{images}'] = result.images.map(img => ({type: 'image', data: {file: img}}));
+  } else {
+    mediaMap['{images}'] = [];
+  }
+
+  // Step 4: 按行处理，仅过滤纯空行，并精确控制换行
+  const lines = message.split('\n').filter(line => line.trim() !== '');
+  const nonVideoSegments: any[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const isLastLine = i === lines.length - 1;
+
+    // 按富媒体占位符分割
+    const tokens = line.split(/(\{cover\}|\{images\}|\{video\})/g);
+
+    // 用于存储当前行的消息段
+    const currentLineSegments: any[] = [];
+    let hasTextContent = false; // 新增标志：当前行是否包含纯文本
+
+    for (const token of tokens) {
+      if (token === '{cover}' || token === '{images}') {
+        // 插入对应的消息段
+        currentLineSegments.push(...mediaMap[token]);
+      } else if (token === '{video}') {
+        // 视频不放入 nonVideoSegments，跳过
+      } else if (token.trim() !== '') {
+        // 普通文本
+        currentLineSegments.push({type: 'text', data: {text: token}});
+        hasTextContent = true; // 标记当前行有文本
+      }
+      // 注意：token 为空字符串时（如占位符在行首/尾），不添加任何内容
+    }
+
+    // 只有当 currentLineSegments 不为空时，才将其加入总列表
+    if (currentLineSegments.length > 0) {
+      nonVideoSegments.push(...currentLineSegments);
+    }
+
+    // 如果不是最后一行，且当前行非空，则添加一个换行符
+    if (!isLastLine && hasTextContent) {
+      nonVideoSegments.push({type: 'text', data: {text: '\n'}});
+    }
+  }
+
+  // Step 5: 构建转发节点
+  const forwardNodes: any[] = [];
+
+  // 非视频内容节点
+  if (nonVideoSegments.length > 0) {
+    forwardNodes.push({
+      type: 'node',
+      data: {
+        user_id: session.selfId,
+        nickname: '分享助手',
+        content: nonVideoSegments
+      }
+    });
+  }
+
+  // 视频节点（仅当模板中有 {video} 且有有效视频时）
+  if (hasVideoInTemplate && result.videoUrl) {
+    if (typeof result.duration === 'number' && result.duration > config.Maximumduration * 60) {
+      // 超时提示已作为普通文本处理（在模板中替换为文字）
+    } else {
+      forwardNodes.push({
+        type: 'node',
+        data: {
+          user_id: session.selfId,
+          nickname: '分享助手',
+          content: [
+            {type: 'video', data: {file: result.videoUrl}},
+            {type: 'text', data: {text: `\n视频直链: ${result.videoUrl}`}}
+          ]
+        }
+      });
+
+      if (config.logLevel === 'link_only' || config.logLevel === 'full') {
+        logger.info(`视频直链 (${result.platform}): ${result.videoUrl}`);
+      }
+    }
+  }
+
+  if (forwardNodes.length === 0) return;
+
+  // Step 6: 发送合并转发
+  try {
+    if (!(session.onebot && session.onebot._request)) throw new Error("onebot is not defined");
+    await session.onebot._request('send_group_forward_msg', {
+      group_id: session.guildId,
+      messages: forwardNodes,
+      news: [{text: result.description || ''}],
+      prompt: result.title || '',
+      summary: 'Powered by furryaxw',
+      source: result.title || ''
+    });
+
+    if (config.logLevel === 'full') {
+      logger.info(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
+    }
+  } catch (err) {
+    logger.warn('合并转发发送失败:', err);
+    // 失败时回退到普通消息
+    await sendResult_plain(session, config, result, logger)
   }
 }

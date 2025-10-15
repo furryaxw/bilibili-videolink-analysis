@@ -32,6 +32,7 @@ export interface PluginConfig {
   Maximumduration_tip: string;
   MinimumTimeInterval: number;
   waitTip_Switch: false | string;
+  useForward: boolean;
 
   // 格式化配置
   format: string; // 【恢复】主格式化模板
