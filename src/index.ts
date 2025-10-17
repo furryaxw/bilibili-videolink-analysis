@@ -5,6 +5,7 @@ import {resolveLinks, processLink} from './core';
 import {ParsedInfo, PluginConfig} from './types';
 import {refreshXhsCookie} from './parsers/xiaohongshu';
 import {} from 'koishi-plugin-adapter-onebot'
+import {TimeoutError} from "koishi-plugin-adapter-onebot/lib/types";
 
 export const name = 'share-links-analysis';
 export const inject = {
@@ -168,23 +169,20 @@ async function sendResult_plain(session: Session, config: PluginConfig, result: 
   message = message.replace(/{description}/g, escapeHtml(result.description ? result.description : ''));
   message = message.replace(/{sourceUrl}/g, escapeHtml(result.sourceUrl || ''));
   message = message.replace(/{cover}/g, result.coverUrl ? h.image(result.coverUrl).toString() : '');
-
   const imagesText = result.images ? result.images.map(img => h.image(img).toString()).join('\n') : '';
   message = message.replace(/{images}/g, imagesText);
-
   message = message.replace(/{stats}/g, escapeHtml(result.stats || ''));
 
   // 【修复】只要 videoUrl 存在就处理，仅当 duration 明确超长时才替换为提示
   if (result.videoUrl) {
+    message = message.replace(/{videoUrl}/g, escapeHtml(result.videoUrl));
     // 仅当 duration 是有效数字且超长时，才显示提示
     if (typeof result.duration === 'number' && result.duration > config.Maximumduration * 60) {
       const tip = escapeHtml(config.Maximumduration_tip || '');
       message = message.replace(/{video}/g, tip);
-      message = message.replace(/{videoUrl}/g, '');
     } else {
       // 正常发送视频和链接
       message = message.replace(/{video}/g, h.video(result.videoUrl).toString());
-      message = message.replace(/{videoUrl}/g, escapeHtml(result.videoUrl));
       if (config.logLevel === 'link_only' || config.logLevel === 'full') {
         logger.info(`视频直链 (${result.platform}): ${result.videoUrl}`);
       }
@@ -198,13 +196,14 @@ async function sendResult_plain(session: Session, config: PluginConfig, result: 
   // 过滤空行，保留含有 < 的行（如图片、视频标签）
   const cleanMessage = message.split('\n').filter(line => line.trim() !== '' || line.includes('<')).join('\n');
 
+  if (config.logLevel === 'full') {
+    logger.info(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
+  }
+
   if (cleanMessage) {
     await session.send(h.quote(session.messageId) + cleanMessage);
   }
 
-  if (config.logLevel === 'full') {
-    logger.info(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
-  }
 }
 
 async function sendResult_forward(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
@@ -220,6 +219,13 @@ async function sendResult_forward(session: Session, config: PluginConfig, result
   message = message.replace(/{description}/g, escapeHtml(result.description || ''));
   message = message.replace(/{sourceUrl}/g, escapeHtml(result.sourceUrl || ''));
   message = message.replace(/{stats}/g, escapeHtml(result.stats || ''));
+  if (result.videoUrl) {
+    message = message.replace(/{videoUrl}/g, escapeHtml(result.videoUrl));
+  }
+  if (typeof result.duration === 'number' && result.duration > config.Maximumduration * 60) {
+    const tip = escapeHtml(config.Maximumduration_tip || '');
+    message = message.replace(/{video}/g, tip);
+  }
 
   // Step 2: 检查是否包含视频占位符
   const hasVideoInTemplate = message.includes('{video}');
@@ -308,7 +314,6 @@ async function sendResult_forward(session: Session, config: PluginConfig, result
           nickname: '分享助手',
           content: [
             {type: 'video', data: {file: result.videoUrl}},
-            {type: 'text', data: {text: `\n视频直链: ${result.videoUrl}`}}
           ]
         }
       });
@@ -321,18 +326,25 @@ async function sendResult_forward(session: Session, config: PluginConfig, result
 
   if (forwardNodes.length === 0) return;
 
-  // Step 6: 发送合并转发
-  if (!(session.onebot && session.onebot._request)) throw new Error("onebot is not defined");
-  await session.onebot._request('send_group_forward_msg', {
-    group_id: session.guildId,
-    messages: forwardNodes,
-    news: [{text: result.description || ''}],
-    prompt: result.title || '',
-    summary: 'Powered by furryaxw',
-    source: result.title || ''
-  });
-
   if (config.logLevel === 'full') {
     logger.info(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
+  }
+
+  // Step 6: 发送合并转发
+  if (!(session.onebot && session.onebot._request)) throw new Error("Onebot is not defined");
+  try {
+    await session.onebot._request('send_group_forward_msg', {
+      group_id: session.guildId,
+      messages: forwardNodes,
+      news: [{text: result.description || ''}],
+      prompt: result.title || '',
+      summary: 'Powered by furryaxw',
+      source: result.title || ''
+    });
+  } catch (e) {
+    if (e instanceof TimeoutError) {
+    } else {
+      throw e;
+    }
   }
 }
