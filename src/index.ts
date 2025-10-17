@@ -5,7 +5,6 @@ import {resolveLinks, processLink} from './core';
 import {ParsedInfo, PluginConfig} from './types';
 import {refreshXhsCookie} from './parsers/xiaohongshu';
 import {} from 'koishi-plugin-adapter-onebot'
-import {TimeoutError} from "koishi-plugin-adapter-onebot/lib/types";
 
 export const name = 'share-links-analysis';
 export const inject = {
@@ -341,8 +340,8 @@ async function sendResult_forward(session: Session, config: PluginConfig, result
       summary: 'Powered by furryaxw',
       source: result.title || ''
     });
-  } catch (e) {
-    if (e instanceof TimeoutError) {
+  } catch (e: any) {
+    if (e.name === 'TimeoutError') {
     } else {
       throw e;
     }
