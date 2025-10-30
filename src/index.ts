@@ -145,8 +145,7 @@ async function sendResult(session: Session, config: PluginConfig, result: Parsed
       await sendResult_forward(session, config, result, logger);
       return; // 成功，结束
     } catch (err) {
-      logger.warn('合并转发失败，回退到普通消息:', err);
-      await sendResult_plain(session, config, result, logger);
+      logger.warn('合并转发失败:', err);
       return;
     }
   } else {
@@ -331,19 +330,12 @@ async function sendResult_forward(session: Session, config: PluginConfig, result
 
   // Step 6: 发送合并转发
   if (!(session.onebot && session.onebot._request)) throw new Error("Onebot is not defined");
-  try {
-    await session.onebot._request('send_group_forward_msg', {
-      group_id: session.guildId,
-      messages: forwardNodes,
-      news: [{text: result.description || ''}],
-      prompt: result.title || '',
-      summary: 'Powered by furryaxw',
-      source: result.title || ''
-    });
-  } catch (e: any) {
-    if (e.name === 'TimeoutError') {
-    } else {
-      throw e;
-    }
-  }
+  await session.onebot._request('send_group_forward_msg', {
+    group_id: session.guildId,
+    messages: forwardNodes,
+    news: [{text: result.description || '-'}, {text: '点击查看详情 | Powered by furryaxw'}],
+    prompt: result.title || '',
+    summary: '分享解析',
+    source: result.title || ''
+  });
 }
