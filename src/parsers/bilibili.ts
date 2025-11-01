@@ -14,8 +14,8 @@ export function match(content: string): Link[] {
 
   // 匹配标准长链接和短链接
   const linkRegex = [
-    { pattern: /(https?:\/\/)?(www\.bilibili\.com\/video\/([ab]v[0-9a-zA-Z]+))/i, type: "video" },
-    { pattern: /(https?:\/\/)?(b23\.tv\/[0-9a-zA-Z]+)/i, type: "short" },
+    { pattern: /(https?:\/\/)?(www\.bilibili\.com\/video\/([ab]v[0-9a-zA-Z]+))/g, type: "video" },
+    { pattern: /(https?:\/\/)?(b23\.tv\/[0-9a-zA-Z]+)/g, type: "short" },
   ];
 
   for (const rule of linkRegex) {

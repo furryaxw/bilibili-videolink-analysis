@@ -12,16 +12,30 @@ import {numeral} from '../utils';
  * @returns 匹配到的链接对象数组
  */
 export function match(content: string): Link[] {
-  const urlRegex = /https?:\/\/(?:www\.xiaohongshu\.com\/discovery\/item\/[A-Za-z0-9]+|xhslink\.com\/[A-Za-z0-9]+)\??[^ \n\r]*/g;
-  const matches = content.match(urlRegex);
-  if (!matches) return [];
+  const results: Link[] = [];
 
-  return matches.map(url => ({
-    platform: 'xiaohongshu',
-    type: 'note',
-    id: url.split('/').pop()!.split('?')[0],
-    url: url
-  }));
+  // 匹配标准长链接和短链接
+  const linkRegex = [
+    { pattern: /(https?:\/\/)?(www\.xiaohongshu\.com\/discovery\/item\/([\w?=\-&\.%]+))/g, type: "discovery" },
+    { pattern: /(https?:\/\/)?(www\.xiaohongshu\.com\/explore\/([\w?=\-&\.%]+))/g, type: "explore" },
+    { pattern: /(https?:\/\/)?(xhslink\.com\/(m\/)?[0-9a-zA-Z]+)/g, type: "short" },
+  ];
+  for (const rule of linkRegex) {
+    const matches = [...content.matchAll(new RegExp(rule.pattern, 'gi'))];
+    for (const matchArr of matches) {
+      if (matchArr[2]) {
+        // 强制将所有链接格式化为 https 开头
+        const formattedUrl = `https://${matchArr[2]}`;
+        results.push({
+          platform: 'xiaohongshu',
+          type: rule.type,
+          id: formattedUrl.split('/').pop()!.split('?')[0],
+          url: formattedUrl
+        });
+      }
+    }
+  }
+  return results;
 }
 
 /**

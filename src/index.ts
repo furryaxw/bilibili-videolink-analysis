@@ -93,7 +93,7 @@ export function apply(ctx: Context, config: PluginConfig) {
   ctx.middleware(async (session, next) => {
     if (!session.content || !session.channelId) return next();
 
-    const content = session.content.replace(/\\/g, '');
+    const content = session.content.replace(/\\/g, '').replace(/&amp;/g, '&');
     const channelId = session.channelId;
     const links = resolveLinks(content);
 
