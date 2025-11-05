@@ -4,6 +4,18 @@ import {Context, Session} from 'koishi';
 import { Link, ParsedInfo, PluginConfig, BilibiliVideoInfo } from '../types';
 import { numeral } from '../utils';
 
+const linkRules = [
+  {
+    pattern: /(?:https?:\/\/)?(?:www\.bilibili\.com\/video\/)(([ab]v[0-9a-zA-Z]+))/gi,
+    type: "video" as const,
+  },
+  {
+    pattern: /(?:https?:\/\/)?(?:b23\.tv\/([0-9a-zA-Z]+))/gi,
+    type: "short" as const,
+  },
+];
+const bvPattern = /(?<![a-zA-Z0-9/])(BV[1-9A-HJ-NP-Za-km-z]{10})(?![a-zA-Z0-9])/gi;
+
 /**
  * 在文本中匹配B站链接 (长链/短链/纯BV号)
  * @param content 消息内容
@@ -11,41 +23,47 @@ import { numeral } from '../utils';
  */
 export function match(content: string): Link[] {
   const results: Link[] = [];
+  const seen = new Set<string>();
 
-  // 匹配标准长链接和短链接
-  const linkRegex = [
-    { pattern: /(https?:\/\/)?(www\.bilibili\.com\/video\/([ab]v[0-9a-zA-Z]+))/g, type: "video" },
-    { pattern: /(https?:\/\/)?(b23\.tv\/[0-9a-zA-Z]+)/g, type: "short" },
-  ];
+  for (const { pattern, type } of linkRules) {
+    let match;
+    while ((match = pattern.exec(content)) !== null) {
+      const id = match[1];
+      if (!id) continue;
 
-  for (const rule of linkRegex) {
-    const matches = [...content.matchAll(new RegExp(rule.pattern, 'gi'))];
-    for (const matchArr of matches) {
-      if (matchArr[2]) {
-        // 强制将所有链接格式化为 https 开头
-        const formattedUrl = `https://${matchArr[2]}`;
-        results.push({
-          platform: 'bilibili',
-          type: rule.type,
-          id: rule.type === 'video' ? matchArr[3] : matchArr[2],
-          url: formattedUrl
-        });
-      }
+      const host = type === "short" ? "b23.tv" : "www.bilibili.com";
+      const path = type === "short" ? id : `video/${id}`;
+      const url = `https://${host}/${path}`;
+
+      if (seen.has(url)) continue;
+      seen.add(url);
+
+      results.push({
+        platform: 'bilibili',
+        type,
+        id,
+        url,
+      });
     }
   }
 
-  // 匹配独立的 BV 号
-  const bvPattern = /(?<![a-zA-Z0-9/])(BV[1-9A-HJ-NP-Za-km-z]{10})(?![a-zA-Z0-9])/gi;
-  const bvMatches = [...content.matchAll(bvPattern)];
-  for (const matchArr of bvMatches) {
-      const videoId = matchArr[1];
-      results.push({
-          platform: 'bilibili',
-          type: 'video',
-          id: videoId,
-          url: `https://www.bilibili.com/video/${videoId}`
-      });
+  // 匹配独立的 BV 号（不包含在链接中）
+  let bvMatch;
+  while ((bvMatch = bvPattern.exec(content)) !== null) {
+    const videoId = bvMatch[1];
+    const url = `https://www.bilibili.com/video/${videoId}`;
+
+    if (seen.has(url)) continue;
+    seen.add(url);
+
+    results.push({
+      platform: 'bilibili',
+      type: 'video',
+      id: videoId,
+      url,
+    });
   }
+
   return results;
 }
 

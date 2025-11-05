@@ -6,6 +6,21 @@ import { Cookie, Page } from 'puppeteer';
 import {load} from 'cheerio';
 import {numeral} from '../utils';
 
+const linkRules = [
+  {
+    pattern: /(?:https?:\/\/)?(?:www\.xiaohongshu\.com\/discovery\/item\/)([\w?=&\-.%]+)/gi,
+    type: "discovery" as const,
+  },
+  {
+    pattern: /(?:https?:\/\/)?(?:www\.xiaohongshu\.com\/explore\/)([\w?=&\-.%]+)/gi,
+    type: "explore" as const,
+  },
+  {
+    pattern: /(?:https?:\/\/)?(?:xhslink\.com\/(?:m\/)?)([0-9a-zA-Z]+)/gi,
+    type: "short" as const,
+  },
+];
+
 /**
  * 在文本中匹配小红书链接 (长链接或短链接)
  * @param content 消息内容
@@ -13,28 +28,34 @@ import {numeral} from '../utils';
  */
 export function match(content: string): Link[] {
   const results: Link[] = [];
+  const seen = new Set<string>();
 
-  // 匹配标准长链接和短链接
-  const linkRegex = [
-    { pattern: /(https?:\/\/)?(www\.xiaohongshu\.com\/discovery\/item\/([\w?=\-&\.%]+))/g, type: "discovery" },
-    { pattern: /(https?:\/\/)?(www\.xiaohongshu\.com\/explore\/([\w?=\-&\.%]+))/g, type: "explore" },
-    { pattern: /(https?:\/\/)?(xhslink\.com\/(m\/)?[0-9a-zA-Z]+)/g, type: "short" },
-  ];
-  for (const rule of linkRegex) {
-    const matches = [...content.matchAll(new RegExp(rule.pattern, 'gi'))];
-    for (const matchArr of matches) {
-      if (matchArr[2]) {
-        // 强制将所有链接格式化为 https 开头
-        const formattedUrl = `https://${matchArr[2]}`;
-        results.push({
-          platform: 'xiaohongshu',
-          type: rule.type,
-          id: formattedUrl.split('/').pop()!.split('?')[0],
-          url: formattedUrl
-        });
-      }
+  for (const { pattern, type } of linkRules) {
+    let match;
+    while ((match = pattern.exec(content)) !== null) {
+      const idPart = match[1];
+      if (!idPart) continue;
+
+      const cleanId = idPart.split('?')[0];
+      const host = type === "short" ? "xhslink.com" : "www.xiaohongshu.com";
+      const pathPrefix = type === "short"
+        ? (idPart.startsWith('m/') ? 'm/' : '')
+        : (type === "discovery" ? "discovery/item/" : "explore/");
+
+      const url = `https://${host}/${pathPrefix}${idPart}`;
+
+      if (seen.has(url)) continue;
+      seen.add(url);
+
+      results.push({
+        platform: 'xiaohongshu',
+        type,
+        id: cleanId,
+        url,
+      });
     }
   }
+
   return results;
 }
 
