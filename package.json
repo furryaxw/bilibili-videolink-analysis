@@ -2,7 +2,7 @@
   "name": "koishi-plugin-share-links-analysis",
   "description": "自用插件",
   "license": "MIT",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [

@@ -16,7 +16,7 @@ const linkRules = [
     type: "explore" as const,
   },
   {
-    pattern: /(?:https?:\/\/)?(?:xhslink\.com\/(?:m\/)?)([0-9a-zA-Z]+)/gi,
+    pattern: /(?:https?:\/\/)?(?:xhslink\.com\/(?:\w\/)?)([0-9a-zA-Z]+)/gi,
     type: "short" as const,
   },
 ];
@@ -64,7 +64,7 @@ export function match(content: string): Link[] {
  * @param ctx - Koishi Context
  * @param config
  */
-export async function refreshXhsCookie(ctx: Context, config: PluginConfig): Promise<boolean> {
+export async function init(ctx: Context, config: PluginConfig): Promise<boolean> {
   const logger = ctx.logger('share-links-analysis:xiaohongshu');
   const platformId = 'xiaohongshu';
 
@@ -271,15 +271,11 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
       });
     }
 
-    const stats = {
-        '点赞': numeral(parseInt(noteData.interactInfo.likedCount), config),
-        '收藏': numeral(parseInt(noteData.interactInfo.collectedCount), config),
-        '评论': numeral(parseInt(noteData.interactInfo.commentCount), config),
-    };
-    let statsString = config.xiaohongshuStatsFormat;
-    (Object.keys(stats) as Array<keyof typeof stats>).forEach(key => {
-        statsString = statsString.replace(`{${key}}`, stats[key]);
-    });
+    const liked = numeral(parseInt(noteData.interactInfo.likedCount), config);
+    const collected = numeral(parseInt(noteData.interactInfo.collectedCount), config);
+    const comment = numeral(parseInt(noteData.interactInfo.commentCount), config);
+
+    const statsString = `点赞: ${liked} | 收藏: ${collected} | 评论: ${comment}`;
 
     return {
       platform: 'xiaohongshu',

@@ -4,7 +4,7 @@ let session_global;
 
 // 定义解析出的链接基本信息
 export interface Link {
-  platform: 'bilibili' | 'xiaohongshu';
+  platform: string;
   type: string;
   id: string;
   url: string;
@@ -12,7 +12,7 @@ export interface Link {
 
 // 定义解析器处理后返回的统一结构化数据格式
 export interface ParsedInfo {
-  platform: 'bilibili' | 'xiaohongshu';
+  platform: string;
   title: string;
   authorName: string;
   description?: string;
@@ -32,18 +32,15 @@ export interface PluginConfig {
   Maximumduration_tip: string;
   MinimumTimeInterval: number;
   waitTip_Switch: false | string;
-  useForward: boolean;
+  useForward: 'plain' | 'forward'|'mixed';
 
   // 格式化配置
-  format: string; // 【恢复】主格式化模板
-  bilibiliStatsFormat: string; // 【新增】B站数据统计格式
-  xiaohongshuStatsFormat: string; // 【新增】小红书数据统计格式
+  format: string; // 主格式化模板
 
   // 高级设置
   parseLimit: number;
   useNumeral: boolean;
   showError: boolean;
-  bVideoIDPreference: 'bv' | 'av';
 
   // 调试设置
   userAgent: string;
@@ -91,12 +88,6 @@ declare module 'koishi' {
   interface Context {
     BiliBiliVideo: any;
     puppeteer?: any;
-  }
-  interface Tables {
-    sla_cookie_cache: {
-      platform: string;
-      cookie: string;
-    }
   }
 }
 

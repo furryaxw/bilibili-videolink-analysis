@@ -1,10 +1,10 @@
 // src/index.ts
 
 import {Context, Schema, h, Logger, Session} from 'koishi';
-import {resolveLinks, processLink} from './core';
+import {resolveLinks, processLink, init} from './core';
 import {ParsedInfo, PluginConfig} from './types';
-import {refreshXhsCookie} from './parsers/xiaohongshu';
 import {} from 'koishi-plugin-adapter-onebot'
+import {sendResult_forward, sendResult_plain, sendResult_mixed} from './utils';
 
 export const name = 'share-links-analysis';
 export const inject = {
@@ -16,6 +16,7 @@ export const usage = `
 开启插件后，即可自动解析分享链接。
 向Bot发送B站、小红书等支持平台的分享链接，会返回图文信息与视频。
 您可以在插件配置中为不同平台分别设置返回的图文消息格式。
+此插件只测试过在Napcat下的兼容性情况，不保证其他平台可用。
 `;
 
 // 配置文件
@@ -25,14 +26,18 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
       Schema.const('1').description('低清晰度优先'),
       Schema.const('2').description('高清晰度优先'),
     ]).role('radio').default('1').description("发送的视频清晰度优先策略"),
-    Maximumduration: Schema.number().default(25).description("允许解析的视频最大时长（分钟）").min(1),
+    Maximumduration: Schema.number().default(5).description("允许解析的视频最大时长（分钟）").min(1),
     Maximumduration_tip: Schema.string().default('视频太长啦！还是去平台官网看吧~').description("对过长视频的文字提示内容"),
-    MinimumTimeInterval: Schema.number().default(180).description("若干秒内不再处理相同链接，防止刷屏").min(1),
+    MinimumTimeInterval: Schema.number().default(600).description("若干秒内不再处理相同链接，防止刷屏").min(1),
     waitTip_Switch: Schema.union([
       Schema.const(false).description('不返回文字提示'),
       Schema.string().description('返回文字提示'),
     ]).description("是否返回等待提示。开启后，会发送`等待提示语`").default(false),
-    useForward: Schema.boolean().default(false).description("使用合并转发(强依赖Napcat，其他环境未测试)"),
+    useForward: Schema.union([
+      Schema.const("plain").description("普通发送"),
+      Schema.const("forward").description("合并转发"),
+      Schema.const("mixed").description("混合发送"),
+    ]).default("mixed").description("发送模式"),
   }).description("基础设置"),
 
   Schema.object({
@@ -40,28 +45,20 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
       `{title}
 {cover}
 作者：{authorName}
-简介：{description}
 {stats}
+----------
+{description}
 {images}
+----------
+{sourceUrl}
 {video}`
-    ).description('统一主输出格式。<br/>可用占位符: `{title}`, `{cover}`, `{authorName}`, `{description}`, `{stats}`, `{sourceUrl}`, `{images}`, `{video}`, `{videoUrl}`'),
+    ).description('图文/视频输出格式。<br/>可用占位符: `{title}`, `{cover}`, `{authorName}`, `{description}`, `{stats}`, `{sourceUrl}`, `{images}`, `{video}`, `{videoUrl}`'),
   }).description("格式化模板"),
-
-  Schema.object({
-    bilibiliStatsFormat: Schema.string().role('textarea').default('播放: {播放} | 弹幕: {弹幕} | 点赞: {点赞} | 硬币: {硬币} | 收藏: {收藏}')
-      .description('Bilibili 链接的数据统计格式。<br/>可用占位符: `{播放}`, `{弹幕}`, `{点赞}`, `{硬币}`, `{收藏}`'),
-    xiaohongshuStatsFormat: Schema.string().role('textarea').default('点赞: {点赞} | 收藏: {收藏} | 评论: {评论}')
-      .description('小红书链接的数据统计格式。<br/>可用占位符: `{点赞}`, `{收藏}`, `{评论}`'),
-  }).description("数据格式化"),
 
   Schema.object({
     parseLimit: Schema.number().default(3).description("单对话多链接解析上限"),
     useNumeral: Schema.boolean().default(true).description("使用格式化数字 (如 10000 -> 1万)"),
     showError: Schema.boolean().default(false).description("当链接不正确时提醒发送者"),
-    bVideoIDPreference: Schema.union([
-      Schema.const("bv").description("BV 号"),
-      Schema.const("av").description("AV 号"),
-    ]).default("bv").description("B站ID 偏好"),
   }).description("高级解析设置"),
 
   Schema.object({
@@ -86,8 +83,8 @@ export function apply(ctx: Context, config: PluginConfig) {
   const lastProcessedUrls: Record<string, Record<string, number>> = {};
 
   ctx.on('ready', async () => {
-    logger.info('插件已启动，执行一次初始的小红书 Cookie 刷新...');
-    await refreshXhsCookie(ctx, config);
+    logger.info('插件已启动，执行插件初始化');
+    await init(ctx, config);
   });
 
   ctx.middleware(async (session, next) => {
@@ -130,212 +127,20 @@ export function apply(ctx: Context, config: PluginConfig) {
   });
 }
 
-function escapeHtml(str: string) {
-  if (!str) return '';
-  return str.replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
 async function sendResult(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
-  if (config.useForward) {
-    try {
-      await sendResult_forward(session, config, result, logger);
-      return; // 成功，结束
-    } catch (err) {
-      logger.warn('合并转发失败:', err);
-      return;
-    }
-  } else {
+  if (!session.channel) {
     await sendResult_plain(session, config, result, logger);
     return;
   }
-}
-
-async function sendResult_plain(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
-  if (config.logLevel === 'full') {
-    logger.info('进入普通消息发送');
+  switch (config.useForward) {
+    case 'forward':
+      await sendResult_forward(session, config, result, logger);
+      return;
+    case "plain":
+      await sendResult_plain(session, config, result, logger);
+      return;
+    case "mixed":
+      await sendResult_mixed(session, config, result, logger);
+      return;
   }
-
-  let message = config.format;
-
-  // 对所有文本内容进行 HTML 转义
-  message = message.replace(/{title}/g, escapeHtml(result.title || ''));
-  message = message.replace(/{authorName}/g, escapeHtml(result.authorName || ''));
-  message = message.replace(/{description}/g, escapeHtml(result.description ? result.description : ''));
-  message = message.replace(/{sourceUrl}/g, escapeHtml(result.sourceUrl || ''));
-  message = message.replace(/{cover}/g, result.coverUrl ? h.image(result.coverUrl).toString() : '');
-  const imagesText = result.images ? result.images.map(img => h.image(img).toString()).join('\n') : '';
-  message = message.replace(/{images}/g, imagesText);
-  message = message.replace(/{stats}/g, escapeHtml(result.stats || ''));
-
-  // 【修复】只要 videoUrl 存在就处理，仅当 duration 明确超长时才替换为提示
-  if (result.videoUrl) {
-    message = message.replace(/{videoUrl}/g, escapeHtml(result.videoUrl));
-    // 仅当 duration 是有效数字且超长时，才显示提示
-    if (typeof result.duration === 'number' && result.duration > config.Maximumduration * 60) {
-      const tip = escapeHtml(config.Maximumduration_tip || '');
-      message = message.replace(/{video}/g, tip);
-    } else {
-      // 正常发送视频和链接
-      message = message.replace(/{video}/g, h.video(result.videoUrl).toString());
-      if (config.logLevel === 'link_only' || config.logLevel === 'full') {
-        logger.info(`视频直链 (${result.platform}): ${result.videoUrl}`);
-      }
-    }
-  } else {
-    // 没有视频则移除占位符
-    message = message.replace(/{video}/g, '');
-    message = message.replace(/{videoUrl}/g, '');
-  }
-
-  // 过滤空行，保留含有 < 的行（如图片、视频标签）
-  const cleanMessage = message.split('\n').filter(line => line.trim() !== '' || line.includes('<')).join('\n');
-
-  if (config.logLevel === 'full') {
-    logger.info(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
-  }
-
-  if (cleanMessage) {
-    await session.send(h.quote(session.messageId) + cleanMessage);
-  }
-
-}
-
-async function sendResult_forward(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
-  if (config.logLevel === 'full') {
-    logger.info('进入合并转发发送');
-  }
-
-  let message = config.format;
-
-  // Step 1: 替换纯文本字段
-  message = message.replace(/{title}/g, escapeHtml(result.title || ''));
-  message = message.replace(/{authorName}/g, escapeHtml(result.authorName || ''));
-  message = message.replace(/{description}/g, escapeHtml(result.description || ''));
-  message = message.replace(/{sourceUrl}/g, escapeHtml(result.sourceUrl || ''));
-  message = message.replace(/{stats}/g, escapeHtml(result.stats || ''));
-  if (result.videoUrl) {
-    message = message.replace(/{videoUrl}/g, escapeHtml(result.videoUrl));
-  }
-  if (typeof result.duration === 'number' && result.duration > config.Maximumduration * 60) {
-    const tip = escapeHtml(config.Maximumduration_tip || '');
-    message = message.replace(/{video}/g, tip);
-  }
-
-  // Step 2: 检查是否包含视频占位符
-  const hasVideoInTemplate = message.includes('{video}');
-
-  // Step 3: 构建富媒体映射
-  const mediaMap: Record<string, any[]> = {};
-
-  // 处理封面
-  if (result.coverUrl) {
-    mediaMap['{cover}'] = [{type: 'image', data: {file: result.coverUrl}}];
-  } else {
-    mediaMap['{cover}'] = [];
-  }
-
-  // 处理图片列表
-  if (result.images && result.images.length > 0) {
-    mediaMap['{images}'] = result.images.map(img => ({type: 'image', data: {file: img}}));
-  } else {
-    mediaMap['{images}'] = [];
-  }
-
-  // Step 4: 按行处理，仅过滤纯空行，并精确控制换行
-  const lines = message.split('\n').filter(line => line.trim() !== '');
-  const nonVideoSegments: any[] = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const isLastLine = i === lines.length - 1;
-
-    // 按富媒体占位符分割
-    const tokens = line.split(/(\{cover\}|\{images\}|\{video\})/g);
-
-    // 用于存储当前行的消息段
-    const currentLineSegments: any[] = [];
-    let hasTextContent = false; // 新增标志：当前行是否包含纯文本
-
-    for (const token of tokens) {
-      if (token === '{cover}' || token === '{images}') {
-        // 插入对应的消息段
-        currentLineSegments.push(...mediaMap[token]);
-      } else if (token === '{video}') {
-        // 视频不放入 nonVideoSegments，跳过
-      } else if (token.trim() !== '') {
-        // 普通文本
-        currentLineSegments.push({type: 'text', data: {text: token}});
-        hasTextContent = true; // 标记当前行有文本
-      }
-      // 注意：token 为空字符串时（如占位符在行首/尾），不添加任何内容
-    }
-
-    // 只有当 currentLineSegments 不为空时，才将其加入总列表
-    if (currentLineSegments.length > 0) {
-      nonVideoSegments.push(...currentLineSegments);
-    }
-
-    // 如果不是最后一行，且当前行非空，则添加一个换行符
-    if (!isLastLine && hasTextContent) {
-      nonVideoSegments.push({type: 'text', data: {text: '\n'}});
-    }
-  }
-
-  // Step 5: 构建转发节点
-  const forwardNodes: any[] = [];
-
-  // 非视频内容节点
-  if (nonVideoSegments.length > 0) {
-    forwardNodes.push({
-      type: 'node',
-      data: {
-        user_id: session.selfId,
-        nickname: '分享助手',
-        content: nonVideoSegments
-      }
-    });
-  }
-
-  // 视频节点（仅当模板中有 {video} 且有有效视频时）
-  if (hasVideoInTemplate && result.videoUrl) {
-    if (typeof result.duration === 'number' && result.duration > config.Maximumduration * 60) {
-      // 超时提示已作为普通文本处理（在模板中替换为文字）
-    } else {
-      forwardNodes.push({
-        type: 'node',
-        data: {
-          user_id: session.selfId,
-          nickname: '分享助手',
-          content: [
-            {type: 'video', data: {file: result.videoUrl}},
-          ]
-        }
-      });
-
-      if (config.logLevel === 'link_only' || config.logLevel === 'full') {
-        logger.info(`视频直链 (${result.platform}): ${result.videoUrl}`);
-      }
-    }
-  }
-
-  if (forwardNodes.length === 0) return;
-
-  if (config.logLevel === 'full') {
-    logger.info(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
-  }
-
-  // Step 6: 发送合并转发
-  if (!(session.onebot && session.onebot._request)) throw new Error("Onebot is not defined");
-  await session.onebot._request('send_group_forward_msg', {
-    group_id: session.guildId,
-    messages: forwardNodes,
-    news: [{text: result.description || '-'}, {text: '点击查看详情 | Powered by furryaxw'}],
-    prompt: result.title || '',
-    summary: '分享解析',
-    source: result.title || ''
-  });
 }

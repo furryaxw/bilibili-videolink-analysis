@@ -1,7 +1,7 @@
 // src/core.ts
 
 import { Context, Session } from 'koishi';
-import { Link, PluginConfig, ParsedInfo } from './types'; // 【修改】导入 ParsedInfo
+import { Link, PluginConfig, ParsedInfo } from './types'; // 导入 ParsedInfo
 import * as Bilibili from './parsers/bilibili';
 import * as Xiaohongshu from './parsers/xiaohongshu';
 
@@ -34,6 +34,15 @@ export async function processLink(ctx: Context, config: PluginConfig, link: Link
   for (const parser of parsers) {
     if (parser.match(link.url).length > 0) {
       return await parser.process(ctx, config, link, session);
+    }
+  }
+  return null;
+}
+
+export async function init(ctx: Context, config: PluginConfig) {
+  for (const parser of parsers) {
+    if (typeof parser.init === 'function') {
+      await parser.init(ctx, config);
     }
   }
   return null;
