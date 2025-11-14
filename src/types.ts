@@ -15,22 +15,20 @@ export interface ParsedInfo {
   platform: string;
   title: string;
   authorName: string;
-  description?: string;
+  mainbody?: string;
   coverUrl?: string;
   videoUrl?: string | null;
-  duration?: number | null;
   sourceUrl: string;
   stats: string;
-  images?: string[];
 }
 
 // 插件配置接口
 export interface PluginConfig {
   // 通用配置
   Video_ClarityPriority: '1' | '2';
-  Maximumduration: number;
-  Maximumduration_tip: string;
-  MinimumTimeInterval: number;
+  Max_size: number;
+  Max_size_tip: string;
+  Min_Interval: number;
   waitTip_Switch: false | string;
   useForward: 'plain' | 'forward'|'mixed';
 
@@ -41,10 +39,14 @@ export interface PluginConfig {
   parseLimit: number;
   useNumeral: boolean;
   showError: boolean;
+  allow_sensitive: boolean;
+  proxy: string;
+  onebotReadDir: string;
+  localDownloadDir: string;
 
   // 调试设置
   userAgent: string;
-  logLevel: 'none' | 'link_only' | 'full'; // 【新增】日志等级替换原布尔值
+  logLevel: 'none' | 'link_only' | 'full';
 }
 
 // Bilibili API 返回的视频信息类型定义 (部分)

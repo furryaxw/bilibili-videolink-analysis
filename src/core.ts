@@ -4,9 +4,10 @@ import { Context, Session } from 'koishi';
 import { Link, PluginConfig, ParsedInfo } from './types'; // 导入 ParsedInfo
 import * as Bilibili from './parsers/bilibili';
 import * as Xiaohongshu from './parsers/xiaohongshu';
+import * as Twitter from './parsers/twitter';
 
 // 定义所有支持的解析器
-const parsers = [Bilibili, Xiaohongshu];
+const parsers = [Bilibili, Xiaohongshu, Twitter];
 
 /**
  * 从文本中解析出所有支持的链接

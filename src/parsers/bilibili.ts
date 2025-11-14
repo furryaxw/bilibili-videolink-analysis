@@ -1,8 +1,8 @@
 // src/parsers/bilibili.ts
 
-import {Context, Session} from 'koishi';
+import {Context, h, Session} from 'koishi';
 import {Link, ParsedInfo, PluginConfig, BilibiliVideoInfo} from '../types';
-import {numeral} from '../utils';
+import {escapeHtml, numeral} from '../utils';
 
 const linkRules = [
   {
@@ -186,10 +186,9 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
       platform: 'bilibili',
       title: data.title,
       authorName: data.owner.name,
-      description: data.desc,
+      mainbody: escapeHtml(data.desc),
       coverUrl: data.pic,
       videoUrl: videoUrl,
-      duration: data.duration,
       sourceUrl: `https://www.bilibili.com/video/${data.bvid}`,
       stats: statsString,
     };

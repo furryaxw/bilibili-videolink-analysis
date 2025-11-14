@@ -1,10 +1,10 @@
 // src/parsers/xiaohongshu.ts
 
-import {Context, Session} from 'koishi';
+import {Context, h, Session} from 'koishi';
 import {Link, ParsedInfo, PluginConfig, XhsInitialState} from '../types';
 import { Cookie, Page } from 'puppeteer';
 import {load} from 'cheerio';
-import {numeral} from '../utils';
+import {escapeHtml, numeral} from '../utils';
 
 const linkRules = [
   {
@@ -277,17 +277,18 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
 
     const statsString = `点赞: ${liked} | 收藏: ${collected} | 评论: ${comment}`;
 
+    const image = images ? images.map(img => h.image(img).toString()).join('\n') : ''
+    const mainbody = escapeHtml(noteData.desc.trim()) + image;
+
     return {
       platform: 'xiaohongshu',
       title: noteData.title,
       authorName: noteData.user.nickname,
-      description: noteData.desc.trim(),
+      mainbody: mainbody,
       coverUrl: coverUrl,
       videoUrl: videoUrl,
-      duration: (videoUrl && noteData.video?.media?.duration) ? noteData.video.media.duration / 1000 : null,
       sourceUrl: urlToFetch,
       stats: statsString,
-      images: images.length > 0 ? images : undefined,
     };
 
   } catch (error: any) {

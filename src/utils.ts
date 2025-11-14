@@ -1,5 +1,15 @@
 import {ParsedInfo, PluginConfig} from './types';
 import {h, Logger, Session} from "koishi";
+import path from 'path';
+import {createWriteStream} from 'fs';
+import {promisify} from 'util';
+import {pipeline} from 'stream';
+import {URL} from 'url';
+import {Agent as HttpAgent} from 'http';
+import {Agent as HttpsAgent} from 'https';
+import {HttpProxyAgent} from 'http-proxy-agent';
+import {HttpsProxyAgent} from 'https-proxy-agent'
+import * as fs from "node:fs";
 
 /**
  * 将数字格式化为易读的字符串（如 万、亿）
@@ -19,7 +29,7 @@ export function numeral(num: number, config: PluginConfig): string {
   return String(num);
 }
 
-function escapeHtml(str: string) {
+export function escapeHtml(str: string) {
   if (!str) return '';
   return str.replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -28,44 +38,269 @@ function escapeHtml(str: string) {
     .replace(/'/g, '&#39;');
 }
 
-export async function sendResult_plain(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
-  if (config.logLevel === 'full') {
-    logger.info('进入普通消息发送');
+function getProxyAgent(proxy: string | undefined, url: string): HttpAgent | HttpsAgent | undefined {
+  if (!proxy) return undefined;
+
+  const u = new URL(url);
+
+  if (u.protocol === 'https:') {
+    return new HttpsProxyAgent(proxy);
+  } else {
+    return new HttpProxyAgent(proxy);
+  }
+}
+
+function parseHtmlToSegments(html: string): any[] {
+  const segments: any[] = [];
+  // 匹配 <img> 标签和普通文本
+  const tokens = html.split(/(<img\s[^>]*src\s*=\s*["']?[^"'>\s]+["']?[^>]*>)/gi);
+
+  for (const token of tokens) {
+    if (!token) continue;
+
+    const imgMatch = token.match(/<img\s[^>]*src\s*=\s*["']?([^"'>\s]+)["']?/i);
+    if (imgMatch) {
+      const url = imgMatch[1];
+      segments.push({type: 'image', data: {file: url}});
+    } else {
+      // 非 <img> 部分：当作普通文本（已转义，可直接使用）
+      // 注意：HTML 中的换行可能是 <br> 或 \n，根据实际情况处理
+      // 此处假设换行用 \n 表示（或上游已转换）
+      if (token.trim() !== '') {
+        segments.push({type: 'text', data: {text: token}});
+      }
+    }
   }
 
+  return segments;
+}
+
+async function downloadAndMapUrl(
+  url: string,
+  proxy: string | undefined,
+  userAgent: string | undefined,
+  localDownloadDir: string,
+  onebotReadDir: string,
+  logger: Logger
+): Promise<string> {
+  await fs.promises.mkdir(localDownloadDir, { recursive: true });
+
+  const u = new URL(url);
+  const ext = path.extname(u.pathname).split('?')[0] || '.bin';
+  const safeFilename = `${Date.now()}_${Math.random().toString(36).substring(2, 10)}${ext}`;
+
+  const actualPath = path.join(localDownloadDir, safeFilename);
+  const onebotPath = path.posix.join(onebotReadDir, safeFilename);
+
+  const fileUrl = `file://${onebotPath}`;
+  return new Promise((resolve, reject) => {
+    const agent = getProxyAgent(proxy, url);
+    const headers = {
+      'User-Agent': userAgent,
+      'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      'Connection': 'keep-alive'
+    };
+    const getter = u.protocol === 'https:' ? require('https').get : require('http').get;
+
+    const req = getter(url, {agent, timeout: 30_000, headers}, (res) => {
+      // 处理重定向
+      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        req.destroy();
+        logger.debug(`重定向: ${url} -> ${res.headers.location}`);
+        downloadAndMapUrl(res.headers.location, proxy, userAgent, localDownloadDir, onebotReadDir, logger)
+          .then(resolve)
+          .catch(reject);
+        return;
+      }
+
+      if (res.statusCode !== 200) {
+        req.destroy();
+        reject(new Error(`HTTP ${res.statusCode} when fetching ${url}`));
+        return;
+      }
+
+      // 检查内容类型，避免下载非图片内容
+      const contentType = res.headers['content-type'] || '';
+      if (!contentType.startsWith('image/') && !contentType.includes('video/')) {
+        req.destroy();
+        reject(new Error(`Unexpected content type: ${contentType}`));
+        return;
+      }
+
+      const pipelineAsync = promisify(pipeline);
+      pipelineAsync(res, createWriteStream(actualPath))
+        .then(() => {
+          logger.debug(`下载成功: ${url} -> ${fileUrl}`);
+          resolve(fileUrl);
+        })
+        .catch((err) => {
+          req.destroy();
+          reject(new Error(`Pipeline failed: ${err.message}`));
+        });
+    });
+
+    req.on('error', (err) => {
+      req.destroy();
+      reject(new Error(`Request error: ${err.message}`));
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('Request timeout'));
+    });
+  });
+}
+
+
+export async function getFileSize(url: string, proxy: string | undefined, userAgent: string | undefined): Promise<number | null> {
+  return new Promise((resolve) => {
+    const u = new URL(url);
+    const agent = getProxyAgent(proxy, url);
+    const getter = u.protocol === 'https:' ? require('https').get : require('http').get;
+
+    const req = getter(url, {
+      agent,
+      method: 'HEAD',
+      timeout: 10_000,
+      headers: {
+        'User-Agent': userAgent
+      }
+    }, (res) => {
+      const len = res.headers['content-length'];
+      if (len && /^\d+$/.test(len)) {
+        resolve(parseInt(len, 10));
+      } else {
+        resolve(null);
+      }
+      req.destroy();
+    });
+
+    req.on('error', () => {
+      req.destroy();
+      resolve(null);
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(null);
+    });
+  });
+}
+
+export async function sendResult_plain(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
+  if (config.logLevel === 'full') {
+    logger.info('进入普通发送');
+  }
+
+  const localDownloadDir = config.localDownloadDir;
+  const onebotReadDir = config.onebotReadDir;
+
+  let mediaCoverUrl = result.coverUrl;
+  let mediaVideoUrl: string | null = result.videoUrl || null;
+  let mediaMainbody = result.mainbody;
+
+  // --- 下载封面 ---
+  if (result.coverUrl) {
+    try {
+      mediaCoverUrl = await downloadAndMapUrl(result.coverUrl, config.proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+      if (config.logLevel === 'full') logger.info(`封面已下载: ${mediaCoverUrl}`);
+    } catch (e) {
+      logger.warn(`封面下载失败: ${result.coverUrl}`, e);
+      mediaCoverUrl = '';
+    }
+  }
+
+  // --- 视频：先检查大小 ---
+  let videoExceedsLimit = false;
+  if (result.videoUrl) {
+    const sizeBytes = await getFileSize(result.videoUrl, config.proxy, config.userAgent);
+    const maxBytes = config.Max_size !== undefined ? config.Max_size * 1024 * 1024 : undefined;
+
+    // 日志用 MB（保留 2 位小数）
+    const formatMB = (bytes: number) => (bytes / (1024 * 1024)).toFixed(2);
+
+    if (sizeBytes === null) {
+      logger.warn(`无法获取视频大小: ${result.videoUrl}，默认允许下载`);
+    } else {
+      const sizeMB = formatMB(sizeBytes);
+      if (maxBytes !== undefined && sizeBytes > maxBytes) {
+        videoExceedsLimit = true;
+        mediaVideoUrl = null;
+        const maxMB = config.Max_size.toFixed(2);
+        if (config.logLevel !== 'none') {
+          logger.info(`视频大小超限 (${sizeMB} MB > ${maxMB} MB): ${result.videoUrl}`);
+        }
+      } else {
+        // 大小合规，执行下载
+        try {
+          mediaVideoUrl = await downloadAndMapUrl(result.videoUrl, config.proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+          if (config.logLevel === 'full') {
+            logger.info(`视频已下载 (${sizeMB} MB): ${mediaVideoUrl}`);
+          }
+        } catch (e) {
+          logger.warn(`视频下载失败: ${result.videoUrl}`, e);
+          mediaVideoUrl = null;
+        }
+      }
+    }
+  }
+
+  // --- 下载 mainbody 中的图片 ---
+  if (result.mainbody) {
+    const imgMatches = [...result.mainbody.matchAll(/<img\s[^>]*src\s*=\s*["']?([^"'>\s]+)["']?/gi)];
+    const urlMap: Record<string, string> = {};
+
+    await Promise.all(
+      imgMatches.map(async (match) => {
+        const remoteUrl = match[1];
+        try {
+          const localUrl = await downloadAndMapUrl(remoteUrl, config.proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+          urlMap[remoteUrl] = localUrl;
+          if (config.logLevel === 'full') logger.info(`正文图片已下载: ${localUrl}`);
+        } catch (e) {
+          logger.warn(`正文图片下载失败: ${remoteUrl}`, e);
+        }
+      })
+    );
+
+    mediaMainbody = result.mainbody;
+    for (const [remote, local] of Object.entries(urlMap)) {
+      const escaped = remote.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      mediaMainbody = mediaMainbody.replace(new RegExp(escaped, 'g'), local);
+    }
+  }
+
+  // === 模板替换 ===
   let message = config.format;
 
-  // 对所有文本内容进行 HTML 转义
   message = message.replace(/{title}/g, escapeHtml(result.title || ''));
   message = message.replace(/{authorName}/g, escapeHtml(result.authorName || ''));
-  message = message.replace(/{description}/g, escapeHtml(result.description ? result.description : ''));
+  message = message.replace(/{mainbody}/g, mediaMainbody ?? '');
   message = message.replace(/{sourceUrl}/g, escapeHtml(result.sourceUrl || ''));
-  message = message.replace(/{cover}/g, result.coverUrl ? h.image(result.coverUrl).toString() : '');
-  const imagesText = result.images ? result.images.map(img => h.image(img).toString()).join('\n') : '';
-  message = message.replace(/{images}/g, imagesText);
+  message = message.replace(/{cover}/g, mediaCoverUrl ? h.image(mediaCoverUrl).toString() : '');
   message = message.replace(/{stats}/g, escapeHtml(result.stats || ''));
 
-  // 只要 videoUrl 存在就处理，仅当 duration 明确超长时才替换为提示
+  // 处理视频相关占位符
   if (result.videoUrl) {
     message = message.replace(/{videoUrl}/g, escapeHtml(result.videoUrl));
-    // 仅当 duration 是有效数字且超长时，才显示提示
-    if (typeof result.duration === 'number' && result.duration > config.Maximumduration * 60) {
-      const tip = escapeHtml(config.Maximumduration_tip || '');
+
+    if (videoExceedsLimit) {
+      const tip = escapeHtml(config.Max_size_tip);
       message = message.replace(/{video}/g, tip);
+    } else if (mediaVideoUrl) {
+      message = message.replace(/{video}/g, h.video(mediaVideoUrl).toString());
     } else {
-      // 正常发送视频和链接
-      message = message.replace(/{video}/g, h.video(result.videoUrl).toString());
+      message = message.replace(/{video}/g, '');
     }
     if (config.logLevel === 'link_only') {
       logger.info(`视频直链 (${result.platform}): ${result.videoUrl}`);
     }
   } else {
-    // 没有视频则移除占位符
     message = message.replace(/{video}/g, '');
     message = message.replace(/{videoUrl}/g, '');
   }
 
-  // 过滤空行，保留含有 < 的行（如图片、视频标签）
   const cleanMessage = message.split('\n').filter(line => line.trim() !== '' || line.includes('<')).join('\n');
 
   if (config.logLevel === 'full') {
@@ -75,94 +310,147 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
   if (cleanMessage) {
     await session.send(h.quote(session.messageId) + cleanMessage);
   }
-
 }
 
-export async function sendResult_forward(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
+export async function sendResult_forward(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger, mixed_sending = false) {
   if (config.logLevel === 'full') {
-    logger.info('进入合并转发发送');
+    logger.info(mixed_sending ? '进入混合发送' : '进入合并发送');
   }
 
-  let message = config.format;
+  const localDownloadDir = config.localDownloadDir;
+  const onebotReadDir = config.onebotReadDir;
 
-  // Step 1: 替换纯文本字段
+  let mediaCoverUrl = result.coverUrl;
+  let mediaVideoUrl: string | null = result.videoUrl || null;
+  let mediaMainbody = result.mainbody;
+
+  // --- 封面 ---
+  if (result.coverUrl) {
+    try {
+      mediaCoverUrl = await downloadAndMapUrl(result.coverUrl, config.proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+    } catch (e) {
+      logger.warn('封面下载失败', e);
+      mediaCoverUrl = '';
+    }
+  }
+
+  // --- 视频大小检查 + 下载 ---
+  let videoExceedsLimit = false;
+  if (result.videoUrl) {
+    const sizeBytes = await getFileSize(result.videoUrl, config.proxy, config.userAgent);
+    const maxBytes = config.Max_size !== undefined ? config.Max_size * 1024 * 1024 : undefined;
+    const formatMB = (bytes: number) => (bytes / (1024 * 1024)).toFixed(2);
+
+    if (sizeBytes === null) {
+      logger.warn(`无法获取视频大小: ${result.videoUrl}，默认允许下载`);
+    } else {
+      const sizeMB = formatMB(sizeBytes);
+      if (maxBytes !== undefined && sizeBytes > maxBytes) {
+        videoExceedsLimit = true;
+        mediaVideoUrl = null;
+        const maxMB = config.Max_size.toFixed(2);
+        if (config.logLevel !== 'none') {
+          logger.info(`视频大小超限 (${sizeMB} MB > ${maxMB} MB): ${result.videoUrl}`);
+        }
+      } else {
+        try {
+          mediaVideoUrl = await downloadAndMapUrl(result.videoUrl, config.proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+          if (config.logLevel === 'full') {
+            logger.info(`视频已下载 (${sizeMB} MB): ${mediaVideoUrl}`);
+          }
+        } catch (e) {
+          logger.warn('视频下载失败', e);
+          mediaVideoUrl = null;
+        }
+      }
+    }
+  }
+
+  // --- mainbody 图片 ---
+  if (result.mainbody) {
+    const imgUrls = [...result.mainbody.matchAll(/<img\s[^>]*src\s*=\s*["']?([^"'>\s]+)["']?/gi)].map(m => m[1]);
+    const urlMap: Record<string, string> = {};
+    await Promise.all(imgUrls.map(async (url) => {
+      try {
+        urlMap[url] = await downloadAndMapUrl(url, config.proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+      } catch (e) {
+        logger.warn(`正文图片下载失败: ${url}`, e);
+      }
+    }));
+    mediaMainbody = result.mainbody;
+    for (const [remote, local] of Object.entries(urlMap)) {
+      const escaped = remote.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      mediaMainbody = mediaMainbody.replace(new RegExp(escaped, 'g'), local);
+    }
+  }
+
+  // === 构建消息模板 ===
+  let message = config.format;
   message = message.replace(/{title}/g, escapeHtml(result.title || ''));
   message = message.replace(/{authorName}/g, escapeHtml(result.authorName || ''));
-  message = message.replace(/{description}/g, escapeHtml(result.description || ''));
   message = message.replace(/{sourceUrl}/g, escapeHtml(result.sourceUrl || ''));
   message = message.replace(/{stats}/g, escapeHtml(result.stats || ''));
+
+  // 处理 {videoUrl} 和 {video} 占位符逻辑（用于后续判断）
   if (result.videoUrl) {
     message = message.replace(/{videoUrl}/g, escapeHtml(result.videoUrl));
-  }
-  if (typeof result.duration === 'number' && result.duration > config.Maximumduration * 60) {
-    const tip = escapeHtml(config.Maximumduration_tip || '');
-    message = message.replace(/{video}/g, tip);
+    if (videoExceedsLimit) {
+      const tip = escapeHtml(config.Max_size_tip);
+      message = message.replace(/{video}/g, tip);
+    }
+    // 注意：这里不替换 {video} 为实际视频，留到转发节点构建时处理
   }
 
-  // Step 2: 检查是否包含视频占位符
   const hasVideoInTemplate = message.includes('{video}');
 
-  // Step 3: 构建富媒体映射
   const mediaMap: Record<string, any[]> = {};
-
-  // 处理封面
-  if (result.coverUrl) {
-    mediaMap['{cover}'] = [{type: 'image', data: {file: result.coverUrl}}];
+  if (mediaCoverUrl) {
+    mediaMap['{cover}'] = [{type: 'image', data: {file: mediaCoverUrl}}];
   } else {
     mediaMap['{cover}'] = [];
   }
 
-  // 处理图片列表
-  if (result.images && result.images.length > 0) {
-    mediaMap['{images}'] = result.images.map(img => ({type: 'image', data: {file: img}}));
-  } else {
-    mediaMap['{images}'] = [];
-  }
-
-  // Step 4: 按行处理，仅过滤纯空行，并精确控制换行
   const lines = message.split('\n').filter(line => line.trim() !== '');
   const nonVideoSegments: any[] = [];
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const isLastLine = i === lines.length - 1;
-
-    // 按富媒体占位符分割
-    const tokens = line.split(/(\{cover\}|\{images\}|\{video\})/g);
-
-    // 用于存储当前行的消息段
+    const tokens = line.split(/(\{cover\}|\{video\})/g);
     const currentLineSegments: any[] = [];
-    let hasTextContent = false; // 新增标志：当前行是否包含纯文本
+    let hasTextContent = false;
 
     for (const token of tokens) {
-      if (token === '{cover}' || token === '{images}') {
-        // 插入对应的消息段
+      if (token === '{cover}') {
         currentLineSegments.push(...mediaMap[token]);
+      } else if (token === '{mainbody}') {
+        const parsed = parseHtmlToSegments(mediaMainbody || '');
+        currentLineSegments.push(...parsed);
+        hasTextContent = parsed.some(seg => seg.type === 'text');
       } else if (token === '{video}') {
-        // 视频不放入 nonVideoSegments，跳过
+        // 超限时替换为提示文本；否则留空（由转发节点处理）
+        if (videoExceedsLimit) {
+          const tip = config.Max_size_tip;
+          currentLineSegments.push({type: 'text', data: {text: tip}});
+          hasTextContent = true;
+        }
+        // 否则不插入内容（视频将作为独立节点）
       } else if (token.trim() !== '') {
-        // 普通文本
         currentLineSegments.push({type: 'text', data: {text: token}});
-        hasTextContent = true; // 标记当前行有文本
+        hasTextContent = true;
       }
-      // 注意：token 为空字符串时（如占位符在行首/尾），不添加任何内容
     }
 
-    // 只有当 currentLineSegments 不为空时，才将其加入总列表
     if (currentLineSegments.length > 0) {
       nonVideoSegments.push(...currentLineSegments);
     }
-
-    // 如果不是最后一行，且当前行非空，则添加一个换行符
     if (!isLastLine && hasTextContent) {
       nonVideoSegments.push({type: 'text', data: {text: '\n'}});
     }
   }
 
-  // Step 5: 构建转发节点
   const forwardNodes: any[] = [];
 
-  // 非视频内容节点
   if (nonVideoSegments.length > 0) {
     forwardNodes.push({
       type: 'node',
@@ -174,146 +462,19 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
     });
   }
 
-  // 视频节点（仅当模板中有 {video} 且有有效视频时）
-  if (hasVideoInTemplate && result.videoUrl) {
-    if (typeof result.duration === 'number' && result.duration > config.Maximumduration * 60) {
-    } else {
+  let videoElement: string | undefined;
+  if (hasVideoInTemplate && result.videoUrl && !videoExceedsLimit && mediaVideoUrl) {
+    if (!mixed_sending) {
       forwardNodes.push({
         type: 'node',
         data: {
           user_id: session.selfId,
           nickname: '分享助手',
-          content: [
-            {type: 'video', data: {file: result.videoUrl}},
-          ]
+          content: [{type: 'video', data: {file: mediaVideoUrl}}]
         }
       });
-    }
-    if (config.logLevel === 'link_only') {
-      logger.info(`视频直链 (${result.platform}): ${result.videoUrl}`);
-    }
-  }
-
-  if (forwardNodes.length === 0) return;
-
-  if (config.logLevel === 'full') {
-    logger.info(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
-  }
-
-  // Step 6: 发送合并转发
-  if (!(session.onebot && session.onebot._request)) throw new Error("Onebot is not defined");
-  await session.onebot._request('send_group_forward_msg', {
-    group_id: session.guildId,
-    messages: forwardNodes,
-    news: [{text: result.description || '-'}, {text: '点击查看详情 | Powered by furryaxw'}],
-    prompt: result.title || '',
-    summary: '分享解析',
-    source: result.title || ''
-  });
-}
-
-export async function sendResult_mixed(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
-  if (config.logLevel === 'full') {
-    logger.info('进入混合转发发送');
-  }
-
-  let message = config.format;
-
-  // Step 1: 替换纯文本字段
-  message = message.replace(/{title}/g, escapeHtml(result.title || ''));
-  message = message.replace(/{authorName}/g, escapeHtml(result.authorName || ''));
-  message = message.replace(/{description}/g, escapeHtml(result.description || ''));
-  message = message.replace(/{sourceUrl}/g, escapeHtml(result.sourceUrl || ''));
-  message = message.replace(/{stats}/g, escapeHtml(result.stats || ''));
-  if (result.videoUrl) {
-    message = message.replace(/{videoUrl}/g, escapeHtml(result.videoUrl));
-  }
-  if (typeof result.duration === 'number' && result.duration > config.Maximumduration * 60) {
-    const tip = escapeHtml(config.Maximumduration_tip || '');
-    message = message.replace(/{video}/g, tip);
-  }
-
-  // Step 2: 检查是否包含视频占位符
-  const hasVideoInTemplate = message.includes('{video}');
-
-  // Step 3: 构建富媒体映射
-  const mediaMap: Record<string, any[]> = {};
-
-  // 处理封面
-  if (result.coverUrl) {
-    mediaMap['{cover}'] = [{type: 'image', data: {file: result.coverUrl}}];
-  } else {
-    mediaMap['{cover}'] = [];
-  }
-
-  // 处理图片列表
-  if (result.images && result.images.length > 0) {
-    mediaMap['{images}'] = result.images.map(img => ({type: 'image', data: {file: img}}));
-  } else {
-    mediaMap['{images}'] = [];
-  }
-
-  // Step 4: 按行处理，仅过滤纯空行，并精确控制换行
-  const lines = message.split('\n').filter(line => line.trim() !== '');
-  const nonVideoSegments: any[] = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const isLastLine = i === lines.length - 1;
-
-    // 按富媒体占位符分割
-    const tokens = line.split(/(\{cover\}|\{images\}|\{video\})/g);
-
-    // 用于存储当前行的消息段
-    const currentLineSegments: any[] = [];
-    let hasTextContent = false; // 新增标志：当前行是否包含纯文本
-
-    for (const token of tokens) {
-      if (token === '{cover}' || token === '{images}') {
-        // 插入对应的消息段
-        currentLineSegments.push(...mediaMap[token]);
-      } else if (token === '{video}') {
-        // 视频不放入 nonVideoSegments，跳过
-      } else if (token.trim() !== '') {
-        // 普通文本
-        currentLineSegments.push({type: 'text', data: {text: token}});
-        hasTextContent = true; // 标记当前行有文本
-      }
-      // 注意：token 为空字符串时（如占位符在行首/尾），不添加任何内容
-    }
-
-    // 只有当 currentLineSegments 不为空时，才将其加入总列表
-    if (currentLineSegments.length > 0) {
-      nonVideoSegments.push(...currentLineSegments);
-    }
-
-    // 如果不是最后一行，且当前行非空，则添加一个换行符
-    if (!isLastLine && hasTextContent) {
-      nonVideoSegments.push({type: 'text', data: {text: '\n'}});
-    }
-  }
-
-  // Step 5: 构建转发节点
-  const forwardNodes: any[] = [];
-
-  // 非视频内容节点
-  if (nonVideoSegments.length > 0) {
-    forwardNodes.push({
-      type: 'node',
-      data: {
-        user_id: session.selfId,
-        nickname: '分享助手',
-        content: nonVideoSegments
-      }
-    });
-  }
-
-  let video;
-  // 视频节点（仅当模板中有 {video} 且有有效视频时）
-  if (hasVideoInTemplate && result.videoUrl) {
-    if (typeof result.duration === 'number' && result.duration > config.Maximumduration * 60) {
     } else {
-      video = h.video(result.videoUrl).toString();
+      videoElement = h.video(mediaVideoUrl).toString();
     }
     if (config.logLevel === 'link_only') {
       logger.info(`视频直链 (${result.platform}): ${result.videoUrl}`);
@@ -326,18 +487,18 @@ export async function sendResult_mixed(session: Session, config: PluginConfig, r
     logger.info(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
   }
 
-  // Step 6: 发送合并转发
   if (!(session.onebot && session.onebot._request)) throw new Error("Onebot is not defined");
-
   const promises = [];
   promises.push(session.onebot._request('send_group_forward_msg', {
     group_id: session.guildId,
     messages: forwardNodes,
-    news: [{text: result.description || '-'}, {text: '点击查看详情 | Powered by furryaxw'}],
+    news: [{text: mediaMainbody || '-'}, {text: '点击查看详情 | Powered by furryaxw'}],
     prompt: result.title || '',
     summary: '分享解析',
     source: result.title || ''
   }));
-  if (video) promises.push(session.send(video));
+  if (mixed_sending && videoElement) {
+    promises.push(session.send(videoElement));
+  }
   await Promise.all(promises);
 }
