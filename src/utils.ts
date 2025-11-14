@@ -153,7 +153,23 @@ async function downloadAndMapUrl(
 }
 
 
-export async function getFileSize(url: string, proxy: string | undefined, userAgent: string | undefined): Promise<number | null> {
+export async function getFileSize(url: string, proxy: string | undefined, userAgent: string | undefined, logger: Logger): Promise<number | null> {
+  try {
+    // 先尝试HEAD请求（标准方式）
+    const headSize = await tryHeadRequest(url, proxy, userAgent, logger);
+    if (headSize !== null) {
+      return headSize;
+    }
+
+    // HEAD失败，尝试GET请求获取部分内容
+    return await tryGetRequestForSize(url, proxy, userAgent, logger);
+  } catch (e) {
+    logger.warn(`获取文件大小失败: ${url}`, e);
+    return null;
+  }
+}
+
+async function tryHeadRequest(url: string, proxy: string | undefined, userAgent: string | undefined, logger: Logger): Promise<number | null> {
   return new Promise((resolve) => {
     const u = new URL(url);
     const agent = getProxyAgent(proxy, url);
@@ -164,7 +180,8 @@ export async function getFileSize(url: string, proxy: string | undefined, userAg
       method: 'HEAD',
       timeout: 10_000,
       headers: {
-        'User-Agent': userAgent
+        'User-Agent': userAgent,
+        'Referer': 'https://www.bilibili.com/'
       }
     }, (res) => {
       const len = res.headers['content-length'];
@@ -176,12 +193,67 @@ export async function getFileSize(url: string, proxy: string | undefined, userAg
       req.destroy();
     });
 
-    req.on('error', () => {
+    req.on('error', (err) => {
+      logger.warn(`HEAD请求失败: ${url}`, err);
       req.destroy();
       resolve(null);
     });
 
     req.on('timeout', () => {
+      logger.warn(`HEAD请求超时: ${url}`);
+      req.destroy();
+      resolve(null);
+    });
+  });
+}
+
+async function tryGetRequestForSize(url: string, proxy: string | undefined, userAgent: string | undefined, logger: Logger): Promise<number | null> {
+  proxy = undefined
+  return new Promise((resolve) => {
+    const u = new URL(url);
+    const agent = getProxyAgent(proxy, url);
+    const getter = u.protocol === 'https:' ? require('https').get : require('http').get;
+
+    const req = getter(url, {
+      agent,
+      timeout: 15_000,
+      headers: {
+        'User-Agent': userAgent,
+        'Range': 'bytes=0-1023' // 只请求前1KB
+      }
+    }, (res) => {
+      const contentRange = res.headers['content-range'];
+      if (contentRange) {
+        // 从 Content-Range 头获取总大小，例如: "bytes 0-1023/12345678"
+        const match = contentRange.match(/\/(\d+)$/);
+        if (match) {
+          resolve(parseInt(match[1], 10));
+          req.destroy();
+          return;
+        }
+      }
+
+      const len = res.headers['content-length'];
+      if (len && /^\d+$/.test(len)) {
+        resolve(parseInt(len, 10));
+      } else {
+        resolve(null);
+      }
+
+      // 读取少量数据后关闭连接
+      res.on('data', () => {
+        req.destroy();
+      });
+    });
+
+    req.on('error', (err) => {
+      logger.warn(`GET请求获取大小失败: ${url}`, err);
+      req.destroy();
+      resolve(null);
+    });
+
+    req.on('timeout', () => {
+      logger.warn(`GET请求获取大小超时: ${url}`);
       req.destroy();
       resolve(null);
     });
@@ -200,10 +272,16 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
   let mediaVideoUrl: string | null = result.videoUrl || null;
   let mediaMainbody = result.mainbody;
 
+  let proxy = undefined;
+  if (config.proxy_settings[result.platform as keyof typeof config.proxy_settings]) {
+    proxy = config.proxy;
+    logger.info("正在使用代理")
+  }
+
   // --- 下载封面 ---
   if (result.coverUrl) {
     try {
-      mediaCoverUrl = await downloadAndMapUrl(result.coverUrl, config.proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+      mediaCoverUrl = await downloadAndMapUrl(result.coverUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
       if (config.logLevel === 'full') logger.info(`封面已下载: ${mediaCoverUrl}`);
     } catch (e) {
       logger.warn(`封面下载失败: ${result.coverUrl}`, e);
@@ -214,7 +292,7 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
   // --- 视频：先检查大小 ---
   let videoExceedsLimit = false;
   if (result.videoUrl) {
-    const sizeBytes = await getFileSize(result.videoUrl, config.proxy, config.userAgent);
+    const sizeBytes = await getFileSize(result.videoUrl, proxy, config.userAgent, logger);
     const maxBytes = config.Max_size !== undefined ? config.Max_size * 1024 * 1024 : undefined;
 
     // 日志用 MB（保留 2 位小数）
@@ -234,7 +312,7 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
       } else {
         // 大小合规，执行下载
         try {
-          mediaVideoUrl = await downloadAndMapUrl(result.videoUrl, config.proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+          mediaVideoUrl = await downloadAndMapUrl(result.videoUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
           if (config.logLevel === 'full') {
             logger.info(`视频已下载 (${sizeMB} MB): ${mediaVideoUrl}`);
           }
@@ -255,7 +333,7 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
       imgMatches.map(async (match) => {
         const remoteUrl = match[1];
         try {
-          const localUrl = await downloadAndMapUrl(remoteUrl, config.proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+          const localUrl = await downloadAndMapUrl(remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
           urlMap[remoteUrl] = localUrl;
           if (config.logLevel === 'full') logger.info(`正文图片已下载: ${localUrl}`);
         } catch (e) {
@@ -324,10 +402,16 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
   let mediaVideoUrl: string | null = result.videoUrl || null;
   let mediaMainbody = result.mainbody;
 
+  let proxy = undefined;
+  if (config.proxy_settings[result.platform as keyof typeof config.proxy_settings]) {
+    proxy = config.proxy;
+    logger.info("正在使用代理")
+  }
+
   // --- 封面 ---
   if (result.coverUrl) {
     try {
-      mediaCoverUrl = await downloadAndMapUrl(result.coverUrl, config.proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+      mediaCoverUrl = await downloadAndMapUrl(result.coverUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
     } catch (e) {
       logger.warn('封面下载失败', e);
       mediaCoverUrl = '';
@@ -337,7 +421,7 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
   // --- 视频大小检查 + 下载 ---
   let videoExceedsLimit = false;
   if (result.videoUrl) {
-    const sizeBytes = await getFileSize(result.videoUrl, config.proxy, config.userAgent);
+    const sizeBytes = await getFileSize(result.videoUrl, proxy, config.userAgent, logger);
     const maxBytes = config.Max_size !== undefined ? config.Max_size * 1024 * 1024 : undefined;
     const formatMB = (bytes: number) => (bytes / (1024 * 1024)).toFixed(2);
 
@@ -354,7 +438,7 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
         }
       } else {
         try {
-          mediaVideoUrl = await downloadAndMapUrl(result.videoUrl, config.proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+          mediaVideoUrl = await downloadAndMapUrl(result.videoUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
           if (config.logLevel === 'full') {
             logger.info(`视频已下载 (${sizeMB} MB): ${mediaVideoUrl}`);
           }
@@ -372,7 +456,7 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
     const urlMap: Record<string, string> = {};
     await Promise.all(imgUrls.map(async (url) => {
       try {
-        urlMap[url] = await downloadAndMapUrl(url, config.proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+        urlMap[url] = await downloadAndMapUrl(url, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
       } catch (e) {
         logger.warn(`正文图片下载失败: ${url}`, e);
       }

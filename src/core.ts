@@ -8,6 +8,7 @@ import * as Twitter from './parsers/twitter';
 
 // 定义所有支持的解析器
 const parsers = [Bilibili, Xiaohongshu, Twitter];
+export const parsers_str = ['bilibili', 'xiaohongshu', 'twitter'];
 
 /**
  * 从文本中解析出所有支持的链接

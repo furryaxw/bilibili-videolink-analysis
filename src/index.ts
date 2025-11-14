@@ -1,7 +1,7 @@
 // src/index.ts
 
 import {Context, Schema, h, Logger, Session} from 'koishi';
-import {resolveLinks, processLink, init} from './core';
+import {resolveLinks, processLink, init, parsers_str} from './core';
 import {ParsedInfo, PluginConfig} from './types';
 import {} from 'koishi-plugin-adapter-onebot'
 import {sendResult_forward, sendResult_plain} from './utils';
@@ -26,7 +26,7 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
       Schema.const('1').description('低清晰度优先'),
       Schema.const('2').description('高清晰度优先'),
     ]).role('radio').default('1').description("发送的视频清晰度优先策略"),
-    Max_size: Schema.number().default(5).description("允许发送的最大文件大小（Mb）"),
+    Max_size: Schema.number().default(20).description("允许发送的最大文件大小（Mb）"),
     Max_size_tip: Schema.string().default('文件体积过大，策略已阻止发送').description("对大文件的文字提示内容"),
     MinimumTimeInterval: Schema.number().default(600).description("若干秒内不再处理相同链接，防止刷屏").min(1),
     waitTip_Switch: Schema.union([
@@ -59,8 +59,16 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
     useNumeral: Schema.boolean().default(true).description("使用格式化数字 (如 10000 -> 1万)"),
     showError: Schema.boolean().default(false).description("当链接不正确时提醒发送者"),
     allow_sensitive: Schema.boolean().default(false).description("允许NSFW内容"),
-    proxy: Schema.string().description("代理设置"),
   }).description("高级解析设置"),
+
+  Schema.object({
+    proxy: Schema.string().description("代理设置"),
+    proxy_settings: Schema.object(
+      Object.fromEntries(
+        parsers_str.map(parser => [parser, Schema.boolean().default(false)])
+      )
+    ),
+  }).description("代理设置"),
 
   Schema.object({
     onebotReadDir: Schema.string().description('OneBot 实现 (如 NapCat) 所在的容器或环境提供的路径前缀。').default("/app/.config/QQ/NapCat/temp"),

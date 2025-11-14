@@ -40,7 +40,12 @@ export interface PluginConfig {
   useNumeral: boolean;
   showError: boolean;
   allow_sensitive: boolean;
+
+  // 代理设置
   proxy: string;
+  proxy_settings: object;
+
+  // 跨环境路径映射设置
   onebotReadDir: string;
   localDownloadDir: string;
 
