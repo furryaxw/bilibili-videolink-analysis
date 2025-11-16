@@ -443,9 +443,7 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
   let message = config.format;
   message = message.replace(/{title}/g, escapeHtml(result.title || ''));
   message = message.replace(/{authorName}/g, escapeHtml(result.authorName || ''));
-  message = message.replace(/{mainbody}/g, mediaMainbody ?? '');
   message = message.replace(/{sourceUrl}/g, escapeHtml(result.sourceUrl || ''));
-  message = message.replace(/{cover}/g, mediaCoverUrl ? h.image(mediaCoverUrl).toString() : '');
   message = message.replace(/{stats}/g, escapeHtml(result.stats || ''));
 
   const lines = message.split('\n').filter(line => line.trim() !== '');
