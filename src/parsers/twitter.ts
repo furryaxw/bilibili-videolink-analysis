@@ -1,7 +1,7 @@
 // src/parsers/twitter.ts
 
 import {Context, h, Session} from 'koishi';
-import {PluginConfig, ParsedInfo, Link} from '../types';
+import {PluginConfig, ParsedInfo, Link, FileInfo} from '../types';
 import {escapeHtml, numeral} from '../utils';
 
 // ======================
@@ -123,6 +123,14 @@ export async function process(
         const image = media?.images ? media?.images.map(img => h.image(img).toString()).join('\n') : ''
         const mainbody = escapeHtml(tweet_text) + image
 
+        const videos = media?.videos
+        let files: FileInfo[] = [];
+        if (videos){
+          for (const video of videos) {
+            files.push({ type: "video", url: video.url });
+          }
+        }
+
         return {
             platform: 'twitter',
             title: `@${tweetData.user_screen_name} 的推文`,
@@ -130,7 +138,7 @@ export async function process(
             mainbody: mainbody,
             sourceUrl: link.url,
             stats: statsString,
-            videoUrl: media?.videos[0]?.url, // 取第一个视频
+            files: files,
             coverUrl: media?.videos[0]?.preview_url,
         };
 

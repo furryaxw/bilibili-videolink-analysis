@@ -1,7 +1,7 @@
 // src/parsers/xiaohongshu.ts
 
 import {Context, h, Session} from 'koishi';
-import {Link, ParsedInfo, PluginConfig, XhsInitialState} from '../types';
+import {FileInfo, Link, ParsedInfo, PluginConfig, XhsInitialState} from '../types';
 import { Cookie, Page } from 'puppeteer';
 import {load} from 'cheerio';
 import {escapeHtml, numeral} from '../utils';
@@ -280,13 +280,18 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
     const image = images ? images.map(img => h.image(img).toString()).join('\n') : ''
     const mainbody = escapeHtml(noteData.desc.trim()) + image;
 
+    let files: FileInfo[] = [];
+    if (videoUrl){
+      files = [{ type: "video", url: videoUrl }];
+    }
+
     return {
       platform: 'xiaohongshu',
       title: noteData.title,
       authorName: noteData.user.nickname,
       mainbody: mainbody,
       coverUrl: coverUrl,
-      videoUrl: videoUrl,
+      files: files,
       sourceUrl: urlToFetch,
       stats: statsString,
     };

@@ -37,7 +37,8 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
       Schema.const("plain").description("普通发送"),
       Schema.const("forward").description("合并转发"),
       Schema.const("mixed").description("混合发送"),
-    ]).default("mixed").description("发送模式"),
+    ]).default("forward").description("发送模式"),
+    sendFiles: Schema.boolean().default(true).description("是否发送文件（视频等）"),
   }).description("基础设置"),
 
   Schema.object({
@@ -49,9 +50,8 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
 ----------
 {mainbody}
 ----------
-{sourceUrl}
-{video}`
-    ).description('图文/视频输出格式。<br/>可用占位符: `{title}`, `{cover}`, `{authorName}`, `{mainbody}`, `{stats}`, `{sourceUrl}`, `{video}`, `{videoUrl}`'),
+{sourceUrl}`
+    ).description('图文/视频输出格式。<br/>可用占位符: `{title}`, `{cover}`, `{authorName}`, `{mainbody}`, `{stats}`, `{sourceUrl}`'),
   }).description("格式化模板"),
 
   Schema.object({

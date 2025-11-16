@@ -17,9 +17,14 @@ export interface ParsedInfo {
   authorName: string;
   mainbody?: string;
   coverUrl?: string;
-  videoUrl?: string | null;
+  files: FileInfo[];
   sourceUrl: string;
   stats: string;
+}
+
+export interface FileInfo {
+  type: 'video' | 'audio' | 'generic'
+  url: string;
 }
 
 // 插件配置接口
@@ -31,6 +36,7 @@ export interface PluginConfig {
   Min_Interval: number;
   waitTip_Switch: false | string;
   useForward: 'plain' | 'forward'|'mixed';
+  sendFiles: boolean;
 
   // 格式化配置
   format: string; // 主格式化模板

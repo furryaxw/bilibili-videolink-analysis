@@ -1,7 +1,7 @@
 // src/parsers/bilibili.ts
 
 import {Context, h, Session} from 'koishi';
-import {Link, ParsedInfo, PluginConfig, BilibiliVideoInfo} from '../types';
+import {Link, ParsedInfo, PluginConfig, BilibiliVideoInfo, FileInfo} from '../types';
 import {escapeHtml, numeral} from '../utils';
 
 const linkRules = [
@@ -179,8 +179,11 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
     const coin = numeral(data.stat.coin, config);
     const favorite = numeral(data.stat.favorite, config);
 
-    const statsString = `播放: ${play} | 弹幕: ${danmaku}
-  点赞: ${liked} | 硬币: ${coin} | 收藏: ${favorite}`;
+    const statsString = `播放: ${play} | 弹幕: ${danmaku}\n点赞: ${liked} | 硬币: ${coin} | 收藏: ${favorite}`;
+    let files: FileInfo[] = [];
+    if (videoUrl){
+      files = [{ type: "video", url: videoUrl }];
+    }
 
     return {
       platform: 'bilibili',
@@ -188,7 +191,7 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
       authorName: data.owner.name,
       mainbody: escapeHtml(data.desc),
       coverUrl: data.pic,
-      videoUrl: videoUrl,
+      files: files,
       sourceUrl: `https://www.bilibili.com/video/${data.bvid}`,
       stats: statsString,
     };

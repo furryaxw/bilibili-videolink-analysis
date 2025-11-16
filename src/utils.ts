@@ -1,4 +1,4 @@
-import {ParsedInfo, PluginConfig} from './types';
+import {FileInfo, ParsedInfo, PluginConfig} from './types';
 import {h, Logger, Session} from "koishi";
 import path from 'path';
 import {createWriteStream} from 'fs';
@@ -83,7 +83,7 @@ async function downloadAndMapUrl(
   onebotReadDir: string,
   logger: Logger
 ): Promise<string> {
-  await fs.promises.mkdir(localDownloadDir, { recursive: true });
+  await fs.promises.mkdir(localDownloadDir, {recursive: true});
 
   const u = new URL(url);
   const ext = path.extname(u.pathname).split('?')[0] || '.bin';
@@ -103,7 +103,7 @@ async function downloadAndMapUrl(
     };
     const getter = u.protocol === 'https:' ? require('https').get : require('http').get;
 
-    const req = getter(url, {agent, timeout: 30_000, headers}, (res) => {
+    const req = getter(url, {agent, timeout: 30_000, headers}, (res: any) => {
       // 处理重定向
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         req.destroy();
@@ -140,7 +140,7 @@ async function downloadAndMapUrl(
         });
     });
 
-    req.on('error', (err) => {
+    req.on('error', (err: any) => {
       req.destroy();
       reject(new Error(`Request error: ${err.message}`));
     });
@@ -183,7 +183,7 @@ async function tryHeadRequest(url: string, proxy: string | undefined, userAgent:
         'User-Agent': userAgent,
         'Referer': 'https://www.bilibili.com/'
       }
-    }, (res) => {
+    }, (res: any) => {
       const len = res.headers['content-length'];
       if (len && /^\d+$/.test(len)) {
         resolve(parseInt(len, 10));
@@ -193,7 +193,7 @@ async function tryHeadRequest(url: string, proxy: string | undefined, userAgent:
       req.destroy();
     });
 
-    req.on('error', (err) => {
+    req.on('error', (err: any) => {
       logger.warn(`HEAD请求失败: ${url}`, err);
       req.destroy();
       resolve(null);
@@ -221,7 +221,7 @@ async function tryGetRequestForSize(url: string, proxy: string | undefined, user
         'User-Agent': userAgent,
         'Range': 'bytes=0-1023' // 只请求前1KB
       }
-    }, (res) => {
+    }, (res: any) => {
       const contentRange = res.headers['content-range'];
       if (contentRange) {
         // 从 Content-Range 头获取总大小，例如: "bytes 0-1023/12345678"
@@ -246,7 +246,7 @@ async function tryGetRequestForSize(url: string, proxy: string | undefined, user
       });
     });
 
-    req.on('error', (err) => {
+    req.on('error', (err: any) => {
       logger.warn(`GET请求获取大小失败: ${url}`, err);
       req.destroy();
       resolve(null);
@@ -269,13 +269,12 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
   const onebotReadDir = config.onebotReadDir;
 
   let mediaCoverUrl = result.coverUrl;
-  let mediaVideoUrl: string | null = result.videoUrl || null;
   let mediaMainbody = result.mainbody;
 
   let proxy = undefined;
   if (config.proxy_settings[result.platform as keyof typeof config.proxy_settings]) {
     proxy = config.proxy;
-    logger.info("正在使用代理")
+    logger.info("正在使用代理");
   }
 
   // --- 下载封面 ---
@@ -286,41 +285,6 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
     } catch (e) {
       logger.warn(`封面下载失败: ${result.coverUrl}`, e);
       mediaCoverUrl = '';
-    }
-  }
-
-  // --- 视频：先检查大小 ---
-  let videoExceedsLimit = false;
-  if (result.videoUrl) {
-    const sizeBytes = await getFileSize(result.videoUrl, proxy, config.userAgent, logger);
-    const maxBytes = config.Max_size !== undefined ? config.Max_size * 1024 * 1024 : undefined;
-
-    // 日志用 MB（保留 2 位小数）
-    const formatMB = (bytes: number) => (bytes / (1024 * 1024)).toFixed(2);
-
-    if (sizeBytes === null) {
-      logger.warn(`无法获取视频大小: ${result.videoUrl}，默认允许下载`);
-    } else {
-      const sizeMB = formatMB(sizeBytes);
-      if (maxBytes !== undefined && sizeBytes > maxBytes) {
-        videoExceedsLimit = true;
-        mediaVideoUrl = null;
-        const maxMB = config.Max_size.toFixed(2);
-        if (config.logLevel !== 'none') {
-          logger.info(`视频大小超限 (${sizeMB} MB > ${maxMB} MB): ${result.videoUrl}`);
-        }
-      } else {
-        // 大小合规，执行下载
-        try {
-          mediaVideoUrl = await downloadAndMapUrl(result.videoUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
-          if (config.logLevel === 'full') {
-            logger.info(`视频已下载 (${sizeMB} MB): ${mediaVideoUrl}`);
-          }
-        } catch (e) {
-          logger.warn(`视频下载失败: ${result.videoUrl}`, e);
-          mediaVideoUrl = null;
-        }
-      }
     }
   }
 
@@ -351,7 +315,6 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
 
   // === 模板替换 ===
   let message = config.format;
-
   message = message.replace(/{title}/g, escapeHtml(result.title || ''));
   message = message.replace(/{authorName}/g, escapeHtml(result.authorName || ''));
   message = message.replace(/{mainbody}/g, mediaMainbody ?? '');
@@ -359,35 +322,76 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
   message = message.replace(/{cover}/g, mediaCoverUrl ? h.image(mediaCoverUrl).toString() : '');
   message = message.replace(/{stats}/g, escapeHtml(result.stats || ''));
 
-  // 处理视频相关占位符
-  if (result.videoUrl) {
-    message = message.replace(/{videoUrl}/g, escapeHtml(result.videoUrl));
-
-    if (videoExceedsLimit) {
-      const tip = escapeHtml(config.Max_size_tip);
-      message = message.replace(/{video}/g, tip);
-    } else if (mediaVideoUrl) {
-      message = message.replace(/{video}/g, h.video(mediaVideoUrl).toString());
-    } else {
-      message = message.replace(/{video}/g, '');
-    }
-    if (config.logLevel === 'link_only') {
-      logger.info(`视频直链 (${result.platform}): ${result.videoUrl}`);
-    }
-  } else {
-    message = message.replace(/{video}/g, '');
-    message = message.replace(/{videoUrl}/g, '');
-  }
-
+  // 清理空行
   const cleanMessage = message.split('\n').filter(line => line.trim() !== '' || line.includes('<')).join('\n');
 
   if (config.logLevel === 'full') {
     logger.info(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
   }
 
+  const sendPromises: Promise<any>[] = [];
+
+  // 发送主消息
   if (cleanMessage) {
-    await session.send(h.quote(session.messageId) + cleanMessage);
+    sendPromises.push(session.send(h.quote(session.messageId) + cleanMessage));
   }
+
+  // --- 发送 files 中的所有媒体（video/audio/generic）---
+  if (config.sendFiles && Array.isArray(result.files)) {
+    for (const file of result.files) {
+      const {type, url: remoteUrl} = file;
+      if (!['video', 'audio', 'generic'].includes(type)) continue;
+
+      let shouldSend = true;
+      if (config.Max_size !== undefined) {
+        const sizeBytes = await getFileSize(remoteUrl, proxy, config.userAgent, logger);
+        const maxBytes = config.Max_size * 1024 * 1024;
+        if (sizeBytes !== null && sizeBytes > maxBytes) {
+          shouldSend = false;
+          if (config.logLevel !== 'none') {
+            const sizeMB = (sizeBytes / (1024 * 1024)).toFixed(2);
+            const maxMB = config.Max_size.toFixed(2);
+            sendPromises.push(session.send(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)`));
+            logger.info(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)，跳过: ${remoteUrl}`);
+          }
+        }
+      }
+
+      if (shouldSend) {
+        try {
+          const localUrl = await downloadAndMapUrl(remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+          if (!localUrl) continue;
+
+          let element: string | null = null;
+          if (type === 'video') {
+            element = h.video(localUrl).toString();
+          } else if (type === 'audio') {
+            element = h.audio(localUrl).toString();
+          } else if (type === 'generic') {
+            // 注意：标准 OneBot v11 不支持 file，部分实现支持
+            // 若你环境不支持，可改用文本链接：element = escapeHtml(remoteUrl);
+            element = h.file(localUrl).toString();
+          }
+
+          if (element) {
+            sendPromises.push(session.send(element));
+            if (config.logLevel === 'link_only') {
+              logger.info(`${type} 直链 (${result.platform}): ${remoteUrl}`);
+            }
+            if (config.logLevel === 'full') {
+              const size = await getFileSize(remoteUrl, proxy, config.userAgent, logger);
+              const sizeMB = size ? (size / (1024 * 1024)).toFixed(2) : 'unknown';
+              logger.info(`${type} 已发送 (${sizeMB} MB): ${localUrl}`);
+            }
+          }
+        } catch (e) {
+          logger.warn(`${type} 下载/发送失败: ${remoteUrl}`, e);
+        }
+      }
+    }
+  }
+
+  await Promise.all(sendPromises);
 }
 
 export async function sendResult_forward(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger, mixed_sending = false) {
@@ -399,13 +403,12 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
   const onebotReadDir = config.onebotReadDir;
 
   let mediaCoverUrl = result.coverUrl;
-  let mediaVideoUrl: string | null = result.videoUrl || null;
   let mediaMainbody = result.mainbody;
 
   let proxy = undefined;
   if (config.proxy_settings[result.platform as keyof typeof config.proxy_settings]) {
     proxy = config.proxy;
-    logger.info("正在使用代理")
+    logger.info("正在使用代理");
   }
 
   // --- 封面 ---
@@ -415,38 +418,6 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
     } catch (e) {
       logger.warn('封面下载失败', e);
       mediaCoverUrl = '';
-    }
-  }
-
-  // --- 视频大小检查 + 下载 ---
-  let videoExceedsLimit = false;
-  if (result.videoUrl) {
-    const sizeBytes = await getFileSize(result.videoUrl, proxy, config.userAgent, logger);
-    const maxBytes = config.Max_size !== undefined ? config.Max_size * 1024 * 1024 : undefined;
-    const formatMB = (bytes: number) => (bytes / (1024 * 1024)).toFixed(2);
-
-    if (sizeBytes === null) {
-      logger.warn(`无法获取视频大小: ${result.videoUrl}，默认允许下载`);
-    } else {
-      const sizeMB = formatMB(sizeBytes);
-      if (maxBytes !== undefined && sizeBytes > maxBytes) {
-        videoExceedsLimit = true;
-        mediaVideoUrl = null;
-        const maxMB = config.Max_size.toFixed(2);
-        if (config.logLevel !== 'none') {
-          logger.info(`视频大小超限 (${sizeMB} MB > ${maxMB} MB): ${result.videoUrl}`);
-        }
-      } else {
-        try {
-          mediaVideoUrl = await downloadAndMapUrl(result.videoUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
-          if (config.logLevel === 'full') {
-            logger.info(`视频已下载 (${sizeMB} MB): ${mediaVideoUrl}`);
-          }
-        } catch (e) {
-          logger.warn('视频下载失败', e);
-          mediaVideoUrl = null;
-        }
-      }
     }
   }
 
@@ -468,57 +439,34 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
     }
   }
 
-  // === 构建消息模板 ===
+  // === 主消息（不含媒体文件）===
   let message = config.format;
   message = message.replace(/{title}/g, escapeHtml(result.title || ''));
   message = message.replace(/{authorName}/g, escapeHtml(result.authorName || ''));
+  message = message.replace(/{mainbody}/g, mediaMainbody ?? '');
   message = message.replace(/{sourceUrl}/g, escapeHtml(result.sourceUrl || ''));
+  message = message.replace(/{cover}/g, mediaCoverUrl ? h.image(mediaCoverUrl).toString() : '');
   message = message.replace(/{stats}/g, escapeHtml(result.stats || ''));
 
-  // 处理 {videoUrl} 和 {video} 占位符逻辑（用于后续判断）
-  if (result.videoUrl) {
-    message = message.replace(/{videoUrl}/g, escapeHtml(result.videoUrl));
-    if (videoExceedsLimit) {
-      const tip = escapeHtml(config.Max_size_tip);
-      message = message.replace(/{video}/g, tip);
-    }
-    // 注意：这里不替换 {video} 为实际视频，留到转发节点构建时处理
-  }
-
-  const hasVideoInTemplate = message.includes('{video}');
-
-  const mediaMap: Record<string, any[]> = {};
-  if (mediaCoverUrl) {
-    mediaMap['{cover}'] = [{type: 'image', data: {file: mediaCoverUrl}}];
-  } else {
-    mediaMap['{cover}'] = [];
-  }
-
   const lines = message.split('\n').filter(line => line.trim() !== '');
-  const nonVideoSegments: any[] = [];
+  const mainSegments: any[] = [];
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const isLastLine = i === lines.length - 1;
-    const tokens = line.split(/(\{cover\}|\{video\})/g);
+    const tokens = line.split(/(\{cover\})/g);
     const currentLineSegments: any[] = [];
     let hasTextContent = false;
 
     for (const token of tokens) {
       if (token === '{cover}') {
-        currentLineSegments.push(...mediaMap[token]);
+        if (mediaCoverUrl) {
+          currentLineSegments.push({type: 'image', data: {file: mediaCoverUrl}});
+        }
       } else if (token === '{mainbody}') {
         const parsed = parseHtmlToSegments(mediaMainbody || '');
         currentLineSegments.push(...parsed);
         hasTextContent = parsed.some(seg => seg.type === 'text');
-      } else if (token === '{video}') {
-        // 超限时替换为提示文本；否则留空（由转发节点处理）
-        if (videoExceedsLimit) {
-          const tip = config.Max_size_tip;
-          currentLineSegments.push({type: 'text', data: {text: tip}});
-          hasTextContent = true;
-        }
-        // 否则不插入内容（视频将作为独立节点）
       } else if (token.trim() !== '') {
         currentLineSegments.push({type: 'text', data: {text: token}});
         hasTextContent = true;
@@ -526,63 +474,121 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
     }
 
     if (currentLineSegments.length > 0) {
-      nonVideoSegments.push(...currentLineSegments);
+      mainSegments.push(...currentLineSegments);
     }
     if (!isLastLine && hasTextContent) {
-      nonVideoSegments.push({type: 'text', data: {text: '\n'}});
+      mainSegments.push({type: 'text', data: {text: '\n'}});
     }
   }
 
   const forwardNodes: any[] = [];
-
-  if (nonVideoSegments.length > 0) {
+  if (mainSegments.length > 0) {
     forwardNodes.push({
       type: 'node',
       data: {
         user_id: session.selfId,
         nickname: '分享助手',
-        content: nonVideoSegments
+        content: mainSegments
       }
     });
   }
 
-  let videoElement: string | undefined;
-  if (hasVideoInTemplate && result.videoUrl && !videoExceedsLimit && mediaVideoUrl) {
-    if (!mixed_sending) {
-      forwardNodes.push({
-        type: 'node',
-        data: {
-          user_id: session.selfId,
-          nickname: '分享助手',
-          content: [{type: 'video', data: {file: mediaVideoUrl}}]
+  // --- 处理 files 中的所有媒体 ---
+  const extraSendPromises: Promise<any>[] = [];
+
+  if (config.sendFiles && Array.isArray(result.files)) {
+    for (const file of result.files) {
+      const {type, url: remoteUrl} = file;
+      if (!['video', 'audio', 'generic'].includes(type)) continue;
+
+      let shouldInclude = true;
+      if (config.Max_size !== undefined) {
+        const sizeBytes = await getFileSize(remoteUrl, proxy, config.userAgent, logger);
+        const maxBytes = config.Max_size * 1024 * 1024;
+        if (sizeBytes !== null && sizeBytes > maxBytes) {
+          shouldInclude = false;
+          if (config.logLevel !== 'none') {
+            const sizeMB = (sizeBytes / (1024 * 1024)).toFixed(2);
+            const maxMB = config.Max_size.toFixed(2);
+            extraSendPromises.push(session.send(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)`))
+            logger.info(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)，跳过: ${remoteUrl}`);
+          }
         }
-      });
-    } else {
-      videoElement = h.video(mediaVideoUrl).toString();
-    }
-    if (config.logLevel === 'link_only') {
-      logger.info(`视频直链 (${result.platform}): ${result.videoUrl}`);
+      }
+
+      if (shouldInclude) {
+        try {
+          const localUrl = await downloadAndMapUrl(remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+          if (!localUrl) continue;
+
+          if (!mixed_sending) {
+            // 作为转发节点发送
+            let segment: any = null;
+            if (type === 'video') {
+              segment = {type: 'video', data: {file: localUrl}};
+            } else if (type === 'audio') {
+              segment = {type: 'audio', data: {file: localUrl}};
+            } else if (type === 'generic') {
+              // 注意：标准 OneBot 转发节点不支持 file，这里降级为文本链接
+              segment = {type: 'text', data: {text: `📄 文件: ${remoteUrl}`}};
+            }
+
+            if (segment) {
+              forwardNodes.push({
+                type: 'node',
+                data: {
+                  user_id: session.selfId,
+                  nickname: '分享助手',
+                  content: [segment]
+                }
+              });
+            }
+          } else {
+            // 混合模式：独立发送
+            let element: string | null = null;
+            if (type === 'video') element = h.video(localUrl).toString();
+            else if (type === 'audio') element = h.audio(localUrl).toString();
+            else if (type === 'generic') element = h.file(localUrl).toString();
+
+            if (element) {
+              extraSendPromises.push(session.send(element));
+            }
+          }
+
+          if (config.logLevel === 'link_only') {
+            logger.info(`${type} 直链 (${result.platform}): ${remoteUrl}`);
+          }
+        } catch (e) {
+          logger.warn(`${type} 下载失败: ${remoteUrl}`, e);
+        }
+      }
     }
   }
 
-  if (forwardNodes.length === 0) return;
+  if (forwardNodes.length === 0 && extraSendPromises.length === 0) return;
 
   if (config.logLevel === 'full') {
     logger.info(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
   }
 
   if (!(session.onebot && session.onebot._request)) throw new Error("Onebot is not defined");
-  const promises = [];
-  promises.push(session.onebot._request('send_group_forward_msg', {
-    group_id: session.guildId,
-    messages: forwardNodes,
-    news: [{text: mediaMainbody || '-'}, {text: '点击查看详情 | Powered by furryaxw'}],
-    prompt: result.title || '',
-    summary: '分享解析',
-    source: result.title || ''
-  }));
-  if (mixed_sending && videoElement) {
-    promises.push(session.send(videoElement));
+
+  const promises: Promise<any>[] = [];
+
+  if (forwardNodes.length > 0) {
+    promises.push(session.onebot._request('send_group_forward_msg', {
+      group_id: session.guildId,
+      messages: forwardNodes,
+      news: [{text: mediaMainbody || '-'}, {text: '点击查看详情 | Powered by furryaxw'}],
+      prompt: result.title || '',
+      summary: '分享解析',
+      source: result.title || ''
+    }));
   }
+
+  if (mixed_sending && extraSendPromises.length > 0) {
+    promises.push(...extraSendPromises);
+  }
+
   await Promise.all(promises);
 }
