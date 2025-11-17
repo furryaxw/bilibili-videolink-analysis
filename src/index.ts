@@ -4,7 +4,7 @@ import {Context, Schema, h, Logger, Session} from 'koishi';
 import {resolveLinks, processLink, init, parsers_str} from './core';
 import {ParsedInfo, PluginConfig} from './types';
 import {} from 'koishi-plugin-adapter-onebot'
-import {sendResult_forward, sendResult_plain} from './utils';
+import {getEffectiveSettings, isUserAdmin, sendResult_forward, sendResult_plain} from './utils';
 
 export const name = 'share-links-analysis';
 export const inject = {
@@ -58,17 +58,25 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
     parseLimit: Schema.number().default(3).description("单对话多链接解析上限"),
     useNumeral: Schema.boolean().default(true).description("使用格式化数字 (如 10000 -> 1万)"),
     showError: Schema.boolean().default(false).description("当链接不正确时提醒发送者"),
-    allow_sensitive: Schema.boolean().default(false).description("允许NSFW内容"),
   }).description("高级解析设置"),
 
   Schema.object({
     proxy: Schema.string().description("代理设置"),
     proxy_settings: Schema.object(
       Object.fromEntries(
-        parsers_str.map(parser => [parser, Schema.boolean().default(false)])
+        parsers_str.map(parser => [parser, Schema.boolean().default(false).description(`对${parser}使用代理`)])
       )
     ),
   }).description("代理设置"),
+
+  Schema.object({
+    default_parsers: Schema.object(
+      Object.fromEntries(
+        parsers_str.map(parser => [parser, Schema.boolean().default(true).description(`启用${parser}解析器`)])
+      )
+    ),
+    allow_sensitive: Schema.boolean().default(false).description("允许NSFW内容"),
+  }).description("默认解析器设置"),
 
   Schema.object({
     onebotReadDir: Schema.string().description('OneBot 实现 (如 NapCat) 所在的容器或环境提供的路径前缀。').default("/app/.config/QQ/NapCat/temp"),
@@ -86,12 +94,75 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
 ]) as any;
 
 export function apply(ctx: Context, config: PluginConfig) {
+  // @ts-ignore
   ctx.model.extend('sla_cookie_cache', {
     platform: 'string', // 平台名称，如 'xiaohongshu'
     cookie: 'text',   // 存储的 cookie 字符串
   }, {
     primary: 'platform' // 使用平台名称作为主键
   });
+
+  // @ts-ignore
+  ctx.model.extend('sla_group_settings', {
+    guildId: 'string',
+    custom_parsers: 'json',
+    nsfw_enabled: 'boolean',
+  }, {
+    primary: 'guildId',
+  });
+
+  // 注册指令
+  const cmd = ctx.command('share', '分享解析插件配置', {authority: 1})
+    .action(async ({session}) => {
+      if (!session?.guildId || !session?.userId) return '该指令只能在群组中使用。';
+      const {parsers, nsfw} = await getEffectiveSettings(ctx, session.guildId, config);
+      const parserList = Object.entries(parsers)
+        .map(([name, enabled]) => `${enabled ? '✅' : '❌'} ${name}`)
+        .join('\n');
+      return `当前解析器状态：\n${parserList}\nNSFW 内容：${nsfw ? '✅' : '❌'}`.trim();
+    });
+
+  cmd.subcommand('.parsers [parser:string] [mode:string]', '查看/管理当前群的解析器状态', {authority: 1})
+    .action(async ({session}, parser, value) => {
+      if (!session?.guildId || !session?.userId) return '该指令只能在群组中使用。';
+      if (!await isUserAdmin(session, session.userId)) return '权限不足'
+      if (parser) {
+        if (!parsers_str.includes(parser)) return '请输入正确的解析器名称';
+        if (!value) return '请输入正确的模式';
+        const mode = value.trim().toLowerCase() === 'true'
+
+        // @ts-ignore
+        const data = await ctx.database.get('sla_group_settings', session.guildId);
+        // @ts-ignore
+        const final_parsers = {...data[0]?.custom_parsers, ...{[parser]: mode}};
+        const record = {guildId: session.guildId, custom_parsers: final_parsers};
+        // @ts-ignore
+        await ctx.database.upsert('sla_group_settings', [record]);
+      }
+      await session.execute('share');
+    });
+
+  cmd.subcommand('.nsfw [value:string]', '设置是否允许 NSFW 内容', {authority: 1})
+    .action(async ({session}, value) => {
+      if (!session?.guildId || !session?.userId) return '该指令只能在群组中使用。';
+      if (!await isUserAdmin(session, session.userId)) return '权限不足'
+      if (value) {
+        const mode = value.trim().toLowerCase() === 'true'
+        const record = {guildId: session.guildId, nsfw_enabled: mode};
+        // @ts-ignore
+        await ctx.database.upsert('sla_group_settings', [record]);
+      }
+      await session.execute('share');
+    });
+
+  cmd.subcommand('.reset', '重置为全局默认设置', {authority: 1})
+    .action(async ({session}) => {
+      if (!session?.guildId || !session?.userId) return '该指令只能在群组中使用。';
+      if (!await isUserAdmin(session, session.userId)) return '权限不足'
+      // @ts-ignore
+      await ctx.database.remove('sla_group_settings', {guildId: session.guildId});
+      return '已重置为全局默认设置。';
+    });
 
   const logger = ctx.logger('share-links-analysis');
   const lastProcessedUrls: Record<string, Record<string, number>> = {};
@@ -112,6 +183,13 @@ export function apply(ctx: Context, config: PluginConfig) {
 
     let linkCount = 0;
     for (const link of links) {
+      if (session.guildId) {
+        const settings = await getEffectiveSettings(ctx, session.guildId, config)
+        if (!settings.parsers[link.platform]) continue;
+      } else {
+        if (!config.default_parsers[link.platform as keyof typeof config.default_parsers]) continue;
+      }
+
       if (linkCount >= config.parseLimit) {
         await session.send("已达到单次解析上限…");
         break;

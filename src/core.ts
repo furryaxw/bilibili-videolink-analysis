@@ -43,7 +43,9 @@ export async function processLink(ctx: Context, config: PluginConfig, link: Link
 
 export async function init(ctx: Context, config: PluginConfig) {
   for (const parser of parsers) {
+    // @ts-ignore
     if (typeof parser.init === 'function') {
+      // @ts-ignore
       await parser.init(ctx, config);
     }
   }

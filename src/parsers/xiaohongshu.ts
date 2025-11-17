@@ -2,6 +2,7 @@
 
 import {Context, h, Session} from 'koishi';
 import {FileInfo, Link, ParsedInfo, PluginConfig, XhsInitialState} from '../types';
+// @ts-ignore
 import { Cookie, Page } from 'puppeteer';
 import {load} from 'cheerio';
 import {escapeHtml, numeral} from '../utils';
@@ -125,6 +126,7 @@ export async function init(ctx: Context, config: PluginConfig): Promise<boolean>
 
     // 使用过滤后的 cookie 数组来生成字符串
     const cookieString = filteredCookies.map((c: Cookie) => `${c.name}=${c.value}`).join('; ');
+    // @ts-ignore
     await ctx.database.upsert('sla_cookie_cache', [{ platform: platformId, cookie: cookieString }]);
 
     logger.info('成功执行两步刷新策略并缓存了小红书 Cookie！');
@@ -208,7 +210,9 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
 
   if (config.logLevel === 'full') logger.info(`正在抓取小红书页面: ${urlToFetch}`);
   try {
+    // @ts-ignore
     const dbCache = await ctx.database.get('sla_cookie_cache', platformId);
+    // @ts-ignore
     let currentCookie = (dbCache && dbCache.length > 0) ? dbCache[0].cookie : '';
     const requestHeaders: Record<string, string> = {
       'User-Agent': config.userAgent,

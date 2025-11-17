@@ -45,11 +45,12 @@ export interface PluginConfig {
   parseLimit: number;
   useNumeral: boolean;
   showError: boolean;
-  allow_sensitive: boolean;
 
   // 代理设置
   proxy: string;
   proxy_settings: object;
+  default_parsers: object;
+  allow_sensitive: boolean;
 
   // 跨环境路径映射设置
   onebotReadDir: string;

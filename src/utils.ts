@@ -1,5 +1,5 @@
 import {FileInfo, ParsedInfo, PluginConfig} from './types';
-import {h, Logger, Session} from "koishi";
+import {Context, h, Logger, Session} from "koishi";
 import path from 'path';
 import {createWriteStream} from 'fs';
 import {promisify} from 'util';
@@ -152,7 +152,6 @@ async function downloadAndMapUrl(
   });
 }
 
-
 export async function getFileSize(url: string, proxy: string | undefined, userAgent: string | undefined, logger: Logger): Promise<number | null> {
   try {
     // 先尝试HEAD请求（标准方式）
@@ -258,6 +257,49 @@ async function tryGetRequestForSize(url: string, proxy: string | undefined, user
       resolve(null);
     });
   });
+}
+
+export async function getEffectiveSettings(ctx: Context, guildId: string | undefined, config: PluginConfig) {
+  if (guildId !== undefined) {
+    return {
+      parsers: config.default_parsers,
+      nsfw: config.allow_sensitive
+    };
+  }
+
+  // @ts-ignore
+  const data = await ctx.database.get('sla_group_settings', guildId);
+  const record = data[0]
+
+  // 合并：自定义设置覆盖默认
+  // @ts-ignore
+  const effectiveParsers = { ...config.default_parsers, ...record?.custom_parsers ? record.custom_parsers : {} };
+  // @ts-ignore
+  const nsfw_enabled = record?.nsfw_enabled ? record.nsfw_enabled : config.allow_sensitive;
+  return {
+    parsers: effectiveParsers,
+    nsfw: nsfw_enabled
+  };
+}
+
+export async function isUserAdmin(session: Session, userId: string): Promise<boolean> {
+  if (!session.guildId) return false;
+  // @ts-ignore
+  if (session.user?.authority >= 3) return true;
+  try {
+    const memberInfo = await session.bot.getGuildMember(session.guildId, userId);
+    if (!memberInfo) return false;
+
+    const adminRoles = ["owner", "admin", "administrator"];
+    const memberRoles = [...(memberInfo.roles || [])].flat().filter(Boolean);
+
+    for (const role of memberRoles) {
+      if (adminRoles.includes(role.toLowerCase())) return true;
+    }
+    return false;
+  } catch (error) {
+    return true;
+  }
 }
 
 export async function sendResult_plain(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
@@ -508,7 +550,18 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
           if (config.logLevel !== 'none') {
             const sizeMB = (sizeBytes / (1024 * 1024)).toFixed(2);
             const maxMB = config.Max_size.toFixed(2);
-            extraSendPromises.push(session.send(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)`))
+            forwardNodes.push({
+              type: 'node',
+              data: {
+                user_id: session.selfId,
+                nickname: '分享助手',
+                content: {
+                  type: 'text', data: {
+                    text: `文件大小超限 (${sizeMB} MB > ${maxMB} MB)`
+                  }
+                }
+              }
+            });
             logger.info(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)，跳过: ${remoteUrl}`);
           }
         }

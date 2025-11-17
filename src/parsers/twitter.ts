@@ -2,7 +2,7 @@
 
 import {Context, h, Session} from 'koishi';
 import {PluginConfig, ParsedInfo, Link, FileInfo} from '../types';
-import {escapeHtml, numeral} from '../utils';
+import {escapeHtml, getEffectiveSettings, numeral} from '../utils';
 
 // ======================
 // 链接匹配规则
@@ -96,7 +96,8 @@ export async function process(
             return null;
         }
 
-        if (tweetData.possibly_sensitive && !config.allow_sensitive) {
+        const enable_nsfw = await getEffectiveSettings(ctx, session.guildId, config);
+        if (tweetData.possibly_sensitive && !enable_nsfw) {
             await session.send('潜在的不合规内容，已停止发送');
             return null;
         }
