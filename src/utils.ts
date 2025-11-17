@@ -260,7 +260,7 @@ async function tryGetRequestForSize(url: string, proxy: string | undefined, user
 }
 
 export async function getEffectiveSettings(ctx: Context, guildId: string | undefined, config: PluginConfig) {
-  if (guildId !== undefined) {
+  if (guildId == undefined) {
     return {
       parsers: config.default_parsers,
       nsfw: config.allow_sensitive
