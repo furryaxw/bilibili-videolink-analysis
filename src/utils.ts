@@ -393,7 +393,7 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
           if (config.logLevel !== 'none') {
             const sizeMB = (sizeBytes / (1024 * 1024)).toFixed(2);
             const maxMB = config.Max_size.toFixed(2);
-            sendPromises.push(session.send(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)`));
+            sendPromises.push(session.send(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)\n视频直连${remoteUrl}`));
             logger.info(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)，跳过: ${remoteUrl}`);
           }
         }
@@ -483,10 +483,10 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
 
   // === 主消息（不含媒体文件）===
   let message = config.format;
-  message = message.replace(/{title}/g, escapeHtml(result.title || ''));
-  message = message.replace(/{authorName}/g, escapeHtml(result.authorName || ''));
-  message = message.replace(/{sourceUrl}/g, escapeHtml(result.sourceUrl || ''));
-  message = message.replace(/{stats}/g, escapeHtml(result.stats || ''));
+  message = message.replace(/{title}/g, result.title || '');
+  message = message.replace(/{authorName}/g, result.authorName || '');
+  message = message.replace(/{sourceUrl}/g, result.sourceUrl || '');
+  message = message.replace(/{stats}/g, result.stats || '');
 
   const lines = message.split('\n').filter(line => line.trim() !== '');
   const mainSegments: any[] = [];
@@ -557,7 +557,7 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
                 nickname: '分享助手',
                 content: {
                   type: 'text', data: {
-                    text: `文件大小超限 (${sizeMB} MB > ${maxMB} MB)`
+                    text: `文件大小超限 (${sizeMB} MB > ${maxMB} MB)\n视频直连${remoteUrl}`
                   }
                 }
               }
