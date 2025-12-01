@@ -32,11 +32,11 @@ export interface PluginConfig {
   // 通用配置
   Video_ClarityPriority: '1' | '2';
   Max_size: number;
-  Max_size_tip: string;
   Min_Interval: number;
   waitTip_Switch: false | string;
   useForward: 'plain' | 'forward'|'mixed';
   sendFiles: boolean;
+  sendLinks: boolean;
 
   // 格式化配置
   format: string; // 主格式化模板

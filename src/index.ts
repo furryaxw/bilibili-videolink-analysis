@@ -27,8 +27,7 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
       Schema.const('2').description('高清晰度优先'),
     ]).role('radio').default('1').description("发送的视频清晰度优先策略"),
     Max_size: Schema.number().default(20).description("允许发送的最大文件大小（Mb）"),
-    Max_size_tip: Schema.string().default('文件体积过大，策略已阻止发送').description("对大文件的文字提示内容"),
-    MinimumTimeInterval: Schema.number().default(600).description("若干秒内不再处理相同链接，防止刷屏").min(1),
+    Min_Interval: Schema.number().default(600).description("若干秒内不再处理相同链接，防止刷屏").min(1),
     waitTip_Switch: Schema.union([
       Schema.const(false).description('不返回文字提示'),
       Schema.string().description('返回文字提示'),
@@ -39,6 +38,7 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
       Schema.const("mixed").description("混合发送"),
     ]).default("forward").description("发送模式"),
     sendFiles: Schema.boolean().default(true).description("是否发送文件（视频等）"),
+    sendLinks: Schema.boolean().default(false).description("是否附加直链（仅对合并发送有效）"),
   }).description("基础设置"),
 
   Schema.object({

@@ -393,7 +393,7 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
           if (config.logLevel !== 'none') {
             const sizeMB = (sizeBytes / (1024 * 1024)).toFixed(2);
             const maxMB = config.Max_size.toFixed(2);
-            sendPromises.push(session.send(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)\n视频直连${remoteUrl}`));
+            sendPromises.push(session.send(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)`));
             logger.info(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)，跳过: ${remoteUrl}`);
           }
         }
@@ -557,7 +557,7 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
                 nickname: '分享助手',
                 content: {
                   type: 'text', data: {
-                    text: `文件大小超限 (${sizeMB} MB > ${maxMB} MB)\n视频直连${remoteUrl}`
+                    text: `文件大小超限 (${sizeMB} MB > ${maxMB} MB)`
                   }
                 }
               }
@@ -613,6 +613,21 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
           logger.warn(`${type} 下载失败: ${remoteUrl}`, e);
         }
       }
+    }
+  }
+
+  if (config.sendLinks && Array.isArray(result.files)) {
+    for (const file of result.files) {
+      const {type, url: Url} = file;
+
+      forwardNodes.push({
+        type: 'node',
+        data: {
+          user_id: session.selfId,
+          nickname: '分享助手',
+          content: [{type: 'text', data: {text: `${type}: ${Url}`}}]
+        }
+      });
     }
   }
 
