@@ -273,7 +273,7 @@ export async function getEffectiveSettings(ctx: Context, guildId: string | undef
 
   // 合并：自定义设置覆盖默认
   // @ts-ignore
-  const effectiveParsers = { ...config.default_parsers, ...record?.custom_parsers ? record.custom_parsers : {} };
+  const effectiveParsers = {...config.default_parsers, ...record?.custom_parsers ? record.custom_parsers : {}};
   // @ts-ignore
   const nsfw_enabled = record?.nsfw_enabled ? record.nsfw_enabled : config.allow_sensitive;
   return {
@@ -321,12 +321,17 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
 
   // --- 下载封面 ---
   if (result.coverUrl) {
-    try {
-      mediaCoverUrl = await downloadAndMapUrl(result.coverUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
-      if (config.logLevel === 'full') logger.info(`封面已下载: ${mediaCoverUrl}`);
-    } catch (e) {
-      logger.warn(`封面下载失败: ${result.coverUrl}`, e);
-      mediaCoverUrl = '';
+    if (config.usingLocal) {
+      try {
+        mediaCoverUrl = await downloadAndMapUrl(result.coverUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+
+        if (config.logLevel === 'full') logger.info(`封面已下载: ${mediaCoverUrl}`);
+      } catch (e) {
+        logger.warn(`封面下载失败: ${result.coverUrl}`, e);
+        mediaCoverUrl = result.coverUrl;
+      }
+    } else {
+      mediaCoverUrl = result.coverUrl
     }
   }
 
@@ -338,12 +343,16 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
     await Promise.all(
       imgMatches.map(async (match) => {
         const remoteUrl = match[1];
-        try {
-          const localUrl = await downloadAndMapUrl(remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
-          urlMap[remoteUrl] = localUrl;
-          if (config.logLevel === 'full') logger.info(`正文图片已下载: ${localUrl}`);
-        } catch (e) {
-          logger.warn(`正文图片下载失败: ${remoteUrl}`, e);
+        if (config.usingLocal) {
+          try {
+            const localUrl = await downloadAndMapUrl(remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+            urlMap[remoteUrl] = localUrl;
+            if (config.logLevel === 'full') logger.info(`正文图片已下载: ${localUrl}`);
+          } catch (e) {
+            logger.warn(`正文图片下载失败: ${remoteUrl}`, e);
+          }
+        } else {
+          urlMap[remoteUrl] = remoteUrl
         }
       })
     );
@@ -401,7 +410,9 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
 
       if (shouldSend) {
         try {
-          const localUrl = await downloadAndMapUrl(remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+          let localUrl = remoteUrl
+          if (config.usingLocal) localUrl = await downloadAndMapUrl(remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+
           if (!localUrl) continue;
 
           let element: string | null = null;
@@ -455,11 +466,15 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
 
   // --- 封面 ---
   if (result.coverUrl) {
-    try {
-      mediaCoverUrl = await downloadAndMapUrl(result.coverUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
-    } catch (e) {
-      logger.warn('封面下载失败', e);
-      mediaCoverUrl = '';
+    if (config.usingLocal) {
+      try {
+        mediaCoverUrl = await downloadAndMapUrl(result.coverUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+      } catch (e) {
+        logger.warn('封面下载失败', e);
+        mediaCoverUrl = '';
+      }
+    } else {
+      mediaCoverUrl = result.coverUrl
     }
   }
 
@@ -468,12 +483,18 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
     const imgUrls = [...result.mainbody.matchAll(/<img\s[^>]*src\s*=\s*["']?([^"'>\s]+)["']?/gi)].map(m => m[1]);
     const urlMap: Record<string, string> = {};
     await Promise.all(imgUrls.map(async (url) => {
-      try {
-        urlMap[url] = await downloadAndMapUrl(url, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
-      } catch (e) {
-        logger.warn(`正文图片下载失败: ${url}`, e);
+        if (config.usingLocal) {
+          try {
+            urlMap[url] = await downloadAndMapUrl(url, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+          } catch (e) {
+            logger.warn(`正文图片下载失败: ${url}`, e);
+          }
+        } else {
+          urlMap[url] = url
+        }
       }
-    }));
+    ))
+    ;
     mediaMainbody = result.mainbody;
     for (const [remote, local] of Object.entries(urlMap)) {
       const escaped = remote.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -569,7 +590,8 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
 
       if (shouldInclude) {
         try {
-          const localUrl = await downloadAndMapUrl(remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+          let localUrl = remoteUrl;
+          if (config.usingLocal) localUrl = await downloadAndMapUrl(remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
           if (!localUrl) continue;
 
           if (!mixed_sending) {

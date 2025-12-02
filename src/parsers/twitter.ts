@@ -4,9 +4,8 @@ import {Context, h, Session} from 'koishi';
 import {PluginConfig, ParsedInfo, Link, FileInfo} from '../types';
 import {escapeHtml, getEffectiveSettings, numeral} from '../utils';
 
-// ======================
-// 链接匹配规则
-// ======================
+export const name="twitter";
+
 const linkRules = [
     {
         pattern: /https?:\/\/(?:www\.)?(?:twitter\.com|x\.com|mobile\.twitter\.com)\/([\w-]+)\/status\/(\d+)/gi,
@@ -44,7 +43,7 @@ export function match(content: string): Link[] {
             seen.add(cleanUrl);
 
             results.push({
-                platform: 'twitter',
+                platform: name,
                 type: rule.type,
                 id: tweetId,
                 url: cleanUrl,
@@ -64,7 +63,7 @@ export async function process(
     link: Link,
     session: Session
 ): Promise<ParsedInfo | null> {
-    const logger = ctx.logger('twitter:process');
+  const logger = ctx.logger(`share-links-analysis:${name}`);
 
     let apiUrl
     if (link.type === 'short') {
@@ -133,7 +132,7 @@ export async function process(
         }
 
         return {
-            platform: 'twitter',
+            platform: name,
             title: `@${tweetData.user_screen_name} 的推文`,
             authorName: tweetData.user_name || tweetData.user_screen_name,
             mainbody: mainbody,
@@ -183,7 +182,6 @@ function parseMedia(tweetData: any) {
                     preview_url: media.thumbnail_url,
                     duration: media.duration_millis ? media.duration_millis / 1000 : undefined
                 });
-                continue;
         }
     }
     return {images, videos};

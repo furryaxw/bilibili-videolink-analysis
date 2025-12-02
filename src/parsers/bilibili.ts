@@ -4,6 +4,8 @@ import {Context, h, Session} from 'koishi';
 import {Link, ParsedInfo, PluginConfig, BilibiliVideoInfo, FileInfo} from '../types';
 import {escapeHtml, numeral} from '../utils';
 
+export const name="bilibili";
+
 const linkRules = [
   {
     pattern: /(?:https?:\/\/)?(?:www\.bilibili\.com\/video\/)(([ab]v[0-9a-zA-Z]+))/gi,
@@ -39,7 +41,7 @@ export function match(content: string): Link[] {
       seen.add(url);
 
       results.push({
-        platform: 'bilibili',
+        platform: name,
         type,
         id,
         url,
@@ -57,7 +59,7 @@ export function match(content: string): Link[] {
     seen.add(url);
 
     results.push({
-      platform: 'bilibili',
+      platform: name,
       type: 'video',
       id: videoId,
       url,
@@ -76,7 +78,7 @@ export function match(content: string): Link[] {
  * @returns 处理后的标准格式对象
  */
 export async function process(ctx: Context, config: PluginConfig, link: Link, session: Session): Promise<ParsedInfo | null> {
-  const logger = ctx.logger('share-links-analysis:bilibili');
+  const logger = ctx.logger(`share-links-analysis:${name}`);
   let videoId = link.id;
   let videoIdType = link.type;
 
@@ -186,7 +188,7 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
     }
 
     return {
-      platform: 'bilibili',
+      platform: name,
       title: data.title,
       authorName: data.owner.name,
       mainbody: escapeHtml(data.desc),

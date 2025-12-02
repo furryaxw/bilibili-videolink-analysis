@@ -35,6 +35,7 @@ export interface PluginConfig {
   Min_Interval: number;
   waitTip_Switch: false | string;
   useForward: 'plain' | 'forward'|'mixed';
+  usingLocal: boolean;
   sendFiles: boolean;
   sendLinks: boolean;
 
@@ -149,4 +150,27 @@ export interface XhsInitialState {
       };
     };
   };
+}
+
+// 小黑盒内容块类型定义
+export interface ContentBlock {
+  type: 'text' | 'image';
+  content: string;
+}
+
+// 小黑盒帖子完整数据结构
+export interface XiaoHeiHePostData {
+  isImageTextType: boolean;
+  isPostType: boolean;
+  title: string;
+  username: string;
+  level: string;
+  time: string;
+  ip: string;
+  tags: string[];
+  contentBlocks: ContentBlock[];
+  likeCount: string;
+  favoriteCount: string;
+  commentCount: string;
+  coverImage: string;
 }

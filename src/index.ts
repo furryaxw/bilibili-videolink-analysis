@@ -37,6 +37,7 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
       Schema.const("forward").description("合并转发"),
       Schema.const("mixed").description("混合发送"),
     ]).default("forward").description("发送模式"),
+    usingLocal: Schema.boolean().default(false).description("使用本地文件（关闭后代理设置无效）"),
     sendFiles: Schema.boolean().default(true).description("是否发送文件（视频等）"),
     sendLinks: Schema.boolean().default(false).description("是否附加直链（仅对合并发送有效）"),
   }).description("基础设置"),
@@ -127,7 +128,11 @@ export function apply(ctx: Context, config: PluginConfig) {
       if (!session?.guildId || !session?.userId) return '该指令只能在群组中使用。';
       if (!await isUserAdmin(session, session.userId)) return '权限不足'
       if (parser) {
-        if (!parsers_str.includes(parser)) return '请输入正确的解析器名称';
+        type ParserName = typeof parsers_str[number];
+        const isValidParser = (name: string): name is ParserName =>
+          (parsers_str as readonly string[]).includes(name);
+
+        if (!isValidParser(parser)) return '请输入正确的解析器名称';
         if (!value) return '请输入正确的模式';
         const mode = value.trim().toLowerCase() === 'true'
 
@@ -211,8 +216,6 @@ export function apply(ctx: Context, config: PluginConfig) {
       if (result) {
         lastProcessedUrls[channelId][link.url] = now;
         await sendResult(session, config, result, logger);
-      } else if (config.showError) {
-        await session.send(`无法解析链接：${link.url}。可能是不支持的类型或链接有误。`);
       }
       linkCount++;
     }

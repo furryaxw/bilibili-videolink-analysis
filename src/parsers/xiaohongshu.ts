@@ -7,6 +7,8 @@ import { Cookie, Page } from 'puppeteer';
 import {load} from 'cheerio';
 import {escapeHtml, numeral} from '../utils';
 
+export const name="xiaohongshu";
+
 const linkRules = [
   {
     pattern: /(?:https?:\/\/)?(?:www\.xiaohongshu\.com\/discovery\/item\/)([\w?=&\-.%]+)/gi,
@@ -49,7 +51,7 @@ export function match(content: string): Link[] {
       seen.add(url);
 
       results.push({
-        platform: 'xiaohongshu',
+        platform: name,
         type,
         id: cleanId,
         url,
@@ -67,7 +69,6 @@ export function match(content: string): Link[] {
  */
 export async function init(ctx: Context, config: PluginConfig): Promise<boolean> {
   const logger = ctx.logger('share-links-analysis:xiaohongshu');
-  const platformId = 'xiaohongshu';
 
   if (!ctx.puppeteer) {
     logger.warn('Puppeteer 服务未启用，无法自动刷新 Cookie。');
@@ -150,8 +151,7 @@ export async function init(ctx: Context, config: PluginConfig): Promise<boolean>
  * @returns 处理后的标准格式对象
  */
 export async function process(ctx: Context, config: PluginConfig, link: Link, session: Session): Promise<ParsedInfo | null> {
-  const logger = ctx.logger('share-links-analysis:xiaohongshu');
-  const platformId = 'xiaohongshu';
+  const logger = ctx.logger(`share-links-analysis:${name}`);
 
   // 步骤一：从原始分享链接中提取 xsec_token
   let token: string | null = null;
@@ -290,7 +290,7 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
     }
 
     return {
-      platform: 'xiaohongshu',
+      platform: name,
       title: noteData.title,
       authorName: noteData.user.nickname,
       mainbody: mainbody,

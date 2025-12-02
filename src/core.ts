@@ -5,10 +5,11 @@ import { Link, PluginConfig, ParsedInfo } from './types'; // 导入 ParsedInfo
 import * as Bilibili from './parsers/bilibili';
 import * as Xiaohongshu from './parsers/xiaohongshu';
 import * as Twitter from './parsers/twitter';
+import * as Xiaoheihe from './parsers/xiaoheihe';
 
 // 定义所有支持的解析器
-const parsers = [Bilibili, Xiaohongshu, Twitter];
-export const parsers_str = ['bilibili', 'xiaohongshu', 'twitter'];
+const parsers = [Bilibili, Xiaohongshu, Twitter, Xiaoheihe];
+export const parsers_str = parsers.map(p => p.name);
 
 /**
  * 从文本中解析出所有支持的链接
