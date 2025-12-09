@@ -35,7 +35,8 @@ export function resolveLinks(content: string): Link[] {
  */
 export async function processLink(ctx: Context, config: PluginConfig, link: Link, session: Session): Promise<ParsedInfo | null> {
   for (const parser of parsers) {
-    if (parser.match(link.url).length > 0) {
+    if (parser.name == link.platform) {
+      if (config.logLevel == "full") ctx.logger('share-links-analysis').info(`解析平台：${parser.name}，链接：${link.url}`);
       return await parser.process(ctx, config, link, session);
     }
   }

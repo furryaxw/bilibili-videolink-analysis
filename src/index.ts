@@ -1,6 +1,6 @@
 // src/index.ts
 
-import {Context, Schema, h, Logger, Session} from 'koishi';
+import {Context, Schema, Logger, Session} from 'koishi';
 import {resolveLinks, processLink, init, parsers_str} from './core';
 import {ParsedInfo, PluginConfig} from './types';
 import {} from 'koishi-plugin-adapter-onebot'
@@ -58,7 +58,7 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
   Schema.object({
     parseLimit: Schema.number().default(3).description("单对话多链接解析上限"),
     useNumeral: Schema.boolean().default(true).description("使用格式化数字 (如 10000 -> 1万)"),
-    showError: Schema.boolean().default(false).description("当链接不正确时提醒发送者"),
+    showError: Schema.boolean().default(false).description("当链接被阻止时提醒发送者"),
   }).description("高级解析设置"),
 
   Schema.object({
@@ -190,9 +190,17 @@ export function apply(ctx: Context, config: PluginConfig) {
     for (const link of links) {
       if (session.guildId) {
         const settings = await getEffectiveSettings(ctx, session.guildId, config)
-        if (!settings.parsers[link.platform]) continue;
+        if (!settings.parsers[link.platform]) {
+          if (config.logLevel == "full") ctx.logger('share-links-analysis').info(`根据策略，该链接已被阻止解析：平台：${link.platform}，链接：${link.url}`);
+          if (config.showError) await session.send(`根据策略，该链接已被阻止解析：平台：${link.platform}`);
+          continue
+        }
       } else {
-        if (!config.default_parsers[link.platform as keyof typeof config.default_parsers]) continue;
+        if (!config.default_parsers[link.platform as keyof typeof config.default_parsers]) {
+          if (config.logLevel == "full") ctx.logger('share-links-analysis').info(`根据策略，该链接已被阻止解析：平台：${link.platform}，链接：${link.url}`);
+          if (config.showError) await session.send(`根据策略，该链接已被阻止解析：平台：${link.platform}`);
+          continue
+        }
       }
 
       if (linkCount >= config.parseLimit) {

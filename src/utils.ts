@@ -1,4 +1,4 @@
-import {FileInfo, ParsedInfo, PluginConfig} from './types';
+import {ParsedInfo, PluginConfig} from './types';
 import {Context, h, Logger, Session} from "koishi";
 import path from 'path';
 import {createWriteStream} from 'fs';
@@ -36,6 +36,15 @@ export function escapeHtml(str: string) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+export function unescapeHtml(str: string): string {
+  if (!str) return '';
+  return str.replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
 }
 
 function getProxyAgent(proxy: string | undefined, url: string): HttpAgent | HttpsAgent | undefined {
@@ -456,7 +465,7 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
   const onebotReadDir = config.onebotReadDir;
 
   let mediaCoverUrl = result.coverUrl;
-  let mediaMainbody = result.mainbody;
+  let mediaMainbody = unescapeHtml(result.mainbody ?? '');
 
   let proxy = undefined;
   if (config.proxy_settings[result.platform as keyof typeof config.proxy_settings]) {

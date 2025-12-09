@@ -97,7 +97,7 @@ export async function process(
 
         const enable_nsfw = await getEffectiveSettings(ctx, session.guildId, config);
         if (tweetData.possibly_sensitive && !enable_nsfw) {
-            await session.send('潜在的不合规内容，已停止发送');
+            if (config.showError) await session.send(`潜在的不合规内容，根据策略已停止发送`);
             return null;
         }
 

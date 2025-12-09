@@ -96,9 +96,9 @@ export async function process(
       page.waitForFunction(() => {
         return document.querySelector('.hb-bbs-image-text') ||
           document.querySelector('.hb-bbs-post');
-      }, {timeout: 10000}),
+      }, {timeout: 30000}),
       new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('核心内容容器未找到')), 10000)
+        setTimeout(() => reject(new Error('核心内容容器未找到')), 30000)
       )
     ])
 
@@ -250,6 +250,7 @@ export async function process(
       }
 
       return {
+        // @ts-ignore
         isImageTextType,
         isPostType,
         title,

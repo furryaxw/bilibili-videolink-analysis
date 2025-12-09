@@ -10,8 +10,7 @@
 
 特别鸣谢以下项目的支持：
 
-- [@summonhim/koishi-plugin-bili-parser](https://www.npmjs.com/package/@summonhim/koishi-plugin-bili-parser)
-- [koishi-plugin-iirose-media-request](https://www.npmjs.com/package/koishi-plugin-iirose-media-request)
-
-原项目：[koishi-plugin-bilibili-videolink-analysis](https://github.com/shangxueink/koishi-shangxue-apps/tree/main/plugins/bilibili-videolink-analysis)
-~~<br>本项目基于原项目0.6.3版本修改~~ 已重构大部分代码
+- [koishi-plugin-bilibili-videolink-analysis](https://github.com/shangxueink/koishi-shangxue-apps/tree/main/plugins/bilibili-videolink-analysis)
+- [koishi-plugin-xiaohongshu](https://www.npmjs.com/package/koishi-plugin-xiaohongshu)
+以及解析方式原作者：[@MuJie](https://mu-jie.cc/)
+- [BetterTwitFix](https://github.com/dylanpdx/BetterTwitFix)
