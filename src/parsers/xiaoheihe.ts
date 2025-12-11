@@ -10,7 +10,7 @@ export const name = "xiaoheihe";
 
 const linkRules = [
   {
-    pattern: /https?:\/\/api.xiaoheihe\.cn\/v3\/bbs\/app\/api\/web\/share\?link_id=\w+/gi,
+    pattern: /https?:\/\/api.xiaoheihe\.cn\/v3\/bbs\/app\/api\/web\/share\?[\w=&]+/gi,
     type: "bbs_api" as const,
   },
   {
@@ -25,7 +25,9 @@ export function match(content: string): Link[] {
     const match = content.match(rule.pattern);
     if (match) {
       for (const fullUrl of match) {
-        const id = fullUrl.match(/\w+$/)?.[0];
+        let id: string | undefined
+        if (rule.type == "bbs") id = fullUrl.match(/\w+$/)?.[0];
+        else if (rule.type == "bbs_api") id = fullUrl.match(/link_id=\w+/gi)?.[0].slice(8);
         if (id) {
           results.push({
             platform: name,
