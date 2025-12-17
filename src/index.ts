@@ -3,8 +3,8 @@
 import {Context, Schema, Logger, Session} from 'koishi';
 import {resolveLinks, processLink, init, parsers_str} from './core';
 import {ParsedInfo, PluginConfig} from './types';
-import {} from 'koishi-plugin-adapter-onebot'
 import {getEffectiveSettings, isUserAdmin, sendResult_forward, sendResult_plain} from './utils';
+import * as fs from 'node:fs';
 
 export const name = 'share-links-analysis';
 export const inject = {
@@ -41,6 +41,12 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
     sendFiles: Schema.boolean().default(true).description("是否发送文件（视频等）"),
     sendLinks: Schema.boolean().default(false).description("是否附加直链（仅对合并发送有效）"),
   }).description("基础设置"),
+
+  Schema.object({
+    enableCache: Schema.boolean().default(true).description("开启缓存（包括解析结果缓存和资源文件缓存）"),
+    cacheExpiration: Schema.number().default(24).description("缓存过期时间（小时）。设置为 0 则不过期。"),
+    autoCleanInterval: Schema.number().default(1).description("自动清理过期缓存的检查间隔（小时）。"),
+  }).description("缓存设置"),
 
   Schema.object({
     format: Schema.string().role('textarea').default(
@@ -86,16 +92,12 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
 
   Schema.object({
     userAgent: Schema.string().description("所有 API 请求所用的 User-Agent").default("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
-    logLevel: Schema.union([
-      Schema.const('none').description('不记录'),
-      Schema.const('link_only').description('仅记录视频直链'),
-      Schema.const('full').description('记录完整调试信息'),
-    ]).role('radio').default('none').description("选择后台日志记录等级"),
+    debug: Schema.boolean().default(false).description("开启调试模式 (输出详细日志)"),
   }).description("调试设置"),
 ]) as any;
 
 export function apply(ctx: Context, config: PluginConfig) {
-  // @ts-ignore
+  // 数据库模型定义 (无需 ts-ignore)
   ctx.model.extend('sla_cookie_cache', {
     platform: 'string', // 平台名称，如 'xiaohongshu'
     cookie: 'text',   // 存储的 cookie 字符串
@@ -103,7 +105,6 @@ export function apply(ctx: Context, config: PluginConfig) {
     primary: 'platform' // 使用平台名称作为主键
   });
 
-  // @ts-ignore
   ctx.model.extend('sla_group_settings', {
     guildId: 'string',
     custom_parsers: 'json',
@@ -111,6 +112,67 @@ export function apply(ctx: Context, config: PluginConfig) {
   }, {
     primary: 'guildId',
   });
+
+  // 解析结果缓存
+  ctx.model.extend('sla_parse_cache', {
+    key: 'string', // platform + ':' + id
+    data: 'json',
+    created_at: 'double',
+  }, { primary: 'key' });
+
+  // 资源文件缓存 (hash)
+  ctx.model.extend('sla_file_cache', {
+    hash: 'string', // URL MD5
+    path: 'string', // 本地绝对路径
+    url: 'string',
+    created_at: 'double',
+  }, { primary: 'hash' });
+
+  const logger = ctx.logger('share-links-analysis');
+  // 根据配置设置日志等级
+  if (config.debug) {
+    logger.level = 3; // Debug Level
+  }
+
+  // 清理缓存函数
+  const cleanExpiredCache = async () => {
+    if (!config.enableCache || config.cacheExpiration <= 0) return;
+    const now = Date.now();
+    const threshold = now - config.cacheExpiration * 60 * 60 * 1000;
+
+    // 清理解析缓存
+    await ctx.database.remove('sla_parse_cache', {
+      created_at: { $lt: threshold }
+    });
+
+    // 清理文件缓存
+    const expiredFiles = await ctx.database.get('sla_file_cache', {
+      created_at: { $lt: threshold }
+    });
+
+    for (const file of expiredFiles) {
+      try {
+        if (fs.existsSync(file.path)) {
+          await fs.promises.unlink(file.path);
+        }
+      } catch (e) {
+        logger.warn(`删除过期文件失败 ${file.path}: ${e}`);
+      }
+    }
+
+    await ctx.database.remove('sla_file_cache', {
+      created_at: { $lt: threshold }
+    });
+
+    if (expiredFiles.length > 0) {
+      logger.info(`已自动清理 ${expiredFiles.length} 个过期文件。`);
+    }
+  };
+
+  // 设置定时清理
+  if (config.enableCache && config.autoCleanInterval > 0) {
+    ctx.setInterval(cleanExpiredCache, config.autoCleanInterval * 60 * 60 * 1000);
+  }
 
   // 注册指令
   const cmd = ctx.command('share', '分享解析插件配置', {authority: 1})
@@ -136,12 +198,9 @@ export function apply(ctx: Context, config: PluginConfig) {
         if (!value) return '请输入正确的模式';
         const mode = value.trim().toLowerCase() === 'true'
 
-        // @ts-ignore
         const data = await ctx.database.get('sla_group_settings', session.guildId);
-        // @ts-ignore
         const final_parsers = {...data[0]?.custom_parsers, ...{[parser]: mode}};
         const record = {guildId: session.guildId, custom_parsers: final_parsers};
-        // @ts-ignore
         await ctx.database.upsert('sla_group_settings', [record]);
       }
       await session.execute('share');
@@ -154,7 +213,6 @@ export function apply(ctx: Context, config: PluginConfig) {
       if (value) {
         const mode = value.trim().toLowerCase() === 'true'
         const record = {guildId: session.guildId, nsfw_enabled: mode};
-        // @ts-ignore
         await ctx.database.upsert('sla_group_settings', [record]);
       }
       await session.execute('share');
@@ -164,12 +222,27 @@ export function apply(ctx: Context, config: PluginConfig) {
     .action(async ({session}) => {
       if (!session?.guildId || !session?.userId) return '该指令只能在群组中使用。';
       if (!await isUserAdmin(session, session.userId)) return '权限不足'
-      // @ts-ignore
       await ctx.database.remove('sla_group_settings', {guildId: session.guildId});
       return '已重置为全局默认设置。';
     });
 
-  const logger = ctx.logger('share-links-analysis');
+  // 清除缓存指令
+  cmd.subcommand('.clean', '清除所有缓存和文件', {authority: 3})
+    .action(async ({session}) => {
+      await ctx.database.remove('sla_parse_cache', {});
+
+      const allFiles = await ctx.database.get('sla_file_cache', {});
+      for (const file of allFiles) {
+        try {
+          if (fs.existsSync(file.path)) {
+             await fs.promises.unlink(file.path);
+          }
+        } catch {}
+      }
+      await ctx.database.remove('sla_file_cache', {});
+      return '缓存及对应文件已清理。';
+    });
+
   const lastProcessedUrls: Record<string, Record<string, number>> = {};
 
   ctx.on('ready', async () => {
@@ -191,13 +264,13 @@ export function apply(ctx: Context, config: PluginConfig) {
       if (session.guildId) {
         const settings = await getEffectiveSettings(ctx, session.guildId, config)
         if (!settings.parsers[link.platform]) {
-          if (config.logLevel == "full") ctx.logger('share-links-analysis').info(`根据策略，该链接已被阻止解析：平台：${link.platform}，链接：${link.url}`);
+          logger.debug(`根据策略，该链接已被阻止解析：平台：${link.platform}，链接：${link.url}`);
           if (config.showError) await session.send(`根据策略，该链接已被阻止解析：平台：${link.platform}`);
           continue
         }
       } else {
         if (!config.default_parsers[link.platform as keyof typeof config.default_parsers]) {
-          if (config.logLevel == "full") ctx.logger('share-links-analysis').info(`根据策略，该链接已被阻止解析：平台：${link.platform}，链接：${link.url}`);
+          logger.debug(`根据策略，该链接已被阻止解析：平台：${link.platform}，链接：${link.url}`);
           if (config.showError) await session.send(`根据策略，该链接已被阻止解析：平台：${link.platform}`);
           continue
         }
@@ -211,7 +284,7 @@ export function apply(ctx: Context, config: PluginConfig) {
       const now = Date.now();
       if (!lastProcessedUrls[channelId]) lastProcessedUrls[channelId] = {};
       if (now - (lastProcessedUrls[channelId][link.url] || 0) < config.Min_Interval * 1000) {
-        if (config.logLevel === 'full') logger.info(`链接 ${link.url} 在冷却时间内，跳过处理。`);
+        logger.debug(`链接 ${link.url} 在冷却时间内，跳过处理。`);
         continue;
       }
 
@@ -219,31 +292,65 @@ export function apply(ctx: Context, config: PluginConfig) {
         await session.send(config.waitTip_Switch);
       }
 
-      const result = await processLink(ctx, config, link, session);
+      // === 缓存逻辑 ===
+      let result: ParsedInfo | null = null;
+      const cacheKey = `${link.platform}:${link.id}`;
+
+      if (config.enableCache) {
+        const cached = await ctx.database.get('sla_parse_cache', cacheKey);
+        // 检查是否存在且未过期
+        if (cached.length > 0) {
+           const entry = cached[0];
+           const isExpired = config.cacheExpiration > 0 && (Date.now() - entry.created_at > config.cacheExpiration * 60 * 60 * 1000);
+
+           if (!isExpired) {
+             logger.debug(`使用缓存解析结果: ${cacheKey}`);
+             result = entry.data;
+           } else {
+             // 过期删除
+             await ctx.database.remove('sla_parse_cache', { key: cacheKey });
+           }
+        }
+      }
+
+      // 缓存未命中，执行解析
+      if (!result) {
+        result = await processLink(ctx, config, link, session);
+
+        // 写入缓存
+        if (result && config.enableCache) {
+          await ctx.database.upsert('sla_parse_cache', [{
+            key: cacheKey,
+            data: result,
+            created_at: Date.now()
+          }]);
+        }
+      }
+      // === 缓存逻辑结束 ===
 
       if (result) {
         lastProcessedUrls[channelId][link.url] = now;
-        await sendResult(session, config, result, logger);
+        await sendResult(ctx, session, config, result, logger);
       }
       linkCount++;
     }
   });
 }
 
-async function sendResult(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
+async function sendResult(ctx: Context, session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
   if (!session.channel) {
-    await sendResult_plain(session, config, result, logger);
+    await sendResult_plain(ctx, session, config, result, logger);
     return;
   }
   switch (config.useForward) {
     case "plain":
-      await sendResult_plain(session, config, result, logger);
+      await sendResult_plain(ctx, session, config, result, logger);
       return;
     case 'forward':
-      await sendResult_forward(session, config, result, logger, false);
+      await sendResult_forward(ctx, session, config, result, logger, false);
       return;
     case "mixed":
-      await sendResult_forward(session, config, result, logger, true);
+      await sendResult_forward(ctx, session, config, result, logger, true);
       return;
   }
 }

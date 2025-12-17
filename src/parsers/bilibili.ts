@@ -97,9 +97,8 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
       const locationHeader = e.response?.headers?.location;
       if (locationHeader) {
         finalUrl = locationHeader;
-      } else if (config.logLevel === 'full') {
-        logger.debug(`解析短链接时发生网络错误或未找到跳转地址: ${e.message}`);
       }
+      logger.debug(`解析短链接时发生网络错误或未找到跳转地址: ${e.message}`);
     }
 
     if (finalUrl && (finalUrl.includes('b23.tv') || finalUrl.includes('bilibili.com/'))) {
@@ -127,7 +126,7 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
     }
 
     if (finalUrl) {
-      if (config.logLevel === 'full') logger.info(`短链接解析成功，指向: ${finalUrl}`);
+      logger.debug(`短链接解析成功，指向: ${finalUrl}`);
       const matchedLinks = match(finalUrl);
       if (matchedLinks.length > 0 && matchedLinks[0].type === 'video') {
         videoId = matchedLinks[0].id;
@@ -147,7 +146,7 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
     return null;
   }
 
-  if (config.logLevel === 'full') logger.info(`获取视频信息，ID: ${videoId}`);
+  logger.debug(`获取视频信息，ID: ${videoId}`);
   const idType = videoId.startsWith('BV') ? 'bvid' : 'aid';
   const infoUrl = `https://api.bilibili.com/x/web-interface/view?${idType}=${videoId}`;
 
@@ -164,12 +163,12 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
 
     // --- 获取视频直链 ---
     let videoUrl: string | null = null;
-    if (config.logLevel === 'full') logger.info(`尝试获取视频流，bvid: ${data.bvid}`);
+    logger.debug(`尝试获取视频流，bvid: ${data.bvid}`);
     try {
       const videoStream = await ctx.BiliBiliVideo.getBilibiliVideoStream(data.aid, data.bvid, data.pages[0].cid, config.Video_ClarityPriority === '1' ? 32 : 80, 'html5', 1);
       if (videoStream?.data?.durl?.[0]?.url) {
         videoUrl = videoStream.data.durl[0].url;
-        if (config.logLevel === 'full') logger.info(`成功获取视频流，bvid: ${data.bvid}`);
+        logger.debug(`成功获取视频流，bvid: ${data.bvid}`);
       }
     } catch (e: any) {
       logger.error(`通过BiliBiliVideo服务获取视频流失败，bvid: ${data.bvid}: ${e.message}`);

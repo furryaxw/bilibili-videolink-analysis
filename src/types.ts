@@ -39,6 +39,11 @@ export interface PluginConfig {
   sendFiles: boolean;
   sendLinks: boolean;
 
+  // 缓存设置
+  enableCache: boolean;
+  cacheExpiration: number; // 缓存过期时间（小时）
+  autoCleanInterval: number; // 自动清理间隔（小时）
+
   // 格式化配置
   format: string; // 主格式化模板
 
@@ -49,8 +54,8 @@ export interface PluginConfig {
 
   // 代理设置
   proxy: string;
-  proxy_settings: object;
-  default_parsers: object;
+  proxy_settings: Record<string, boolean>;
+  default_parsers: Record<string, boolean>;
   allow_sensitive: boolean;
 
   // 跨环境路径映射设置
@@ -59,7 +64,7 @@ export interface PluginConfig {
 
   // 调试设置
   userAgent: string;
-  logLevel: 'none' | 'link_only' | 'full';
+  debug: boolean;
 }
 
 // Bilibili API 返回的视频信息类型定义 (部分)
@@ -98,12 +103,44 @@ export interface BilibiliVideoInfo {
   };
 }
 
-// 解决 ctx.BiliBiliVideo 和 ctx.puppeteer 的类型报错
+// 解决 ctx.BiliBiliVideo 和 ctx.puppeteer 的类型报错，以及新增的 DB 类型
 declare module 'koishi' {
   interface Context {
     BiliBiliVideo: any;
     puppeteer?: any;
   }
+
+  interface Tables {
+    sla_parse_cache: SlaParseCache;
+    sla_file_cache: SlaFileCache;
+    sla_cookie_cache: SlaCookieCache;
+    sla_group_settings: SlaGroupSettings;
+  }
+}
+
+// 定义数据库表结构接口
+export interface SlaParseCache {
+  key: string;
+  data: ParsedInfo;
+  created_at: number; // 注意：虽然数据库可能是 double，ts类型用 number 即可
+}
+
+export interface SlaFileCache {
+  hash: string;
+  path: string;
+  url: string;
+  created_at: number;
+}
+
+export interface SlaCookieCache {
+  platform: string;
+  cookie: string;
+}
+
+export interface SlaGroupSettings {
+  guildId: string;
+  custom_parsers: Record<string, boolean>;
+  nsfw_enabled: boolean;
 }
 
 // 为小红书笔记数据定义更详细的类型接口

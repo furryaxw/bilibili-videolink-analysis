@@ -127,8 +127,7 @@ export async function init(ctx: Context, config: PluginConfig): Promise<boolean>
 
     // 使用过滤后的 cookie 数组来生成字符串
     const cookieString = filteredCookies.map((c: Cookie) => `${c.name}=${c.value}`).join('; ');
-    // @ts-ignore
-    await ctx.database.upsert('sla_cookie_cache', [{ platform: platformId, cookie: cookieString }]);
+    await ctx.database.upsert('sla_cookie_cache', [{ platform: name, cookie: cookieString }]);
 
     logger.info('成功执行两步刷新策略并缓存了小红书 Cookie！');
     return true;
@@ -160,20 +159,20 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
     const decodedUrl = link.url.replace(/&amp;/g, '&');
     const originalUrl = new URL(decodedUrl);
     token = originalUrl.searchParams.get('xsec_token');
-    if (token && config.logLevel === 'full') {
-      logger.info(`成功从分享链接中提取 xsec_token。`);
-    } else if (config.logLevel === 'full') {
+    if (token) {
+      logger.debug(`成功从分享链接中提取 xsec_token。`);
+    } else {
       logger.debug(`分享链接中未找到 xsec_token: ${link.url}`);
     }
   } catch (e) {
-    if (config.logLevel === 'full') logger.debug(`解析分享链接URL失败: ${link.url}`);
+    logger.debug(`解析分享链接URL失败: ${link.url}`);
   }
 
   let finalUrl = link.url;
 
   // 步骤二：如果是短链接，获取其跳转后的基础地址
   if (link.url.includes('xhslink.com')) {
-    if (config.logLevel === 'full') logger.info(`小红书短链接解析：尝试获取 ${link.url} 的最终地址`);
+    logger.debug(`小红书短链接解析：尝试获取 ${link.url} 的最终地址`);
     try {
       await ctx.http(link.url, {
         method: 'GET',
@@ -181,14 +180,14 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
         redirect: 'manual',
       });
     } catch (e: any) {
-        const location = e.response?.headers?.location;
-        if (location) {
-            finalUrl = location;
-            if (config.logLevel === 'full') logger.info(`短链接解析成功，跳转地址: ${finalUrl}`);
-        } else {
-            logger.error(`解析短链接时发生网络错误: ${e.message}`);
-            return null;
-        }
+      const location = e.response?.headers?.location;
+      if (location) {
+        finalUrl = location;
+        logger.debug(`短链接解析成功，跳转地址: ${finalUrl}`);
+      } else {
+        logger.error(`解析短链接时发生网络错误: ${e.message}`);
+        return null;
+      }
     }
   }
 
@@ -208,11 +207,9 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
     return null;
   }
 
-  if (config.logLevel === 'full') logger.info(`正在抓取小红书页面: ${urlToFetch}`);
+  logger.debug(`正在抓取小红书页面: ${urlToFetch}`);
   try {
-    // @ts-ignore
-    const dbCache = await ctx.database.get('sla_cookie_cache', platformId);
-    // @ts-ignore
+    const dbCache = await ctx.database.get('sla_cookie_cache', name);
     let currentCookie = (dbCache && dbCache.length > 0) ? dbCache[0].cookie : '';
     const requestHeaders: Record<string, string> = {
       'User-Agent': config.userAgent,
@@ -240,8 +237,8 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
     const pageData = JSON.parse(jsonStr) as XhsInitialState;
     const noteKey = Object.keys(pageData.note.noteDetailMap)[0];
     if (!noteKey) {
-        logger.error('无法在页面数据中找到笔记详情。');
-        return null;
+      logger.error('无法在页面数据中找到笔记详情。');
+      return null;
     }
     const noteData = pageData.note.noteDetailMap[noteKey].note;
 
@@ -251,17 +248,13 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
     const images: string[] = [];
 
     if (noteData.type === 'video' && noteData.video) {
-        if (config.logLevel === 'full') {
-            logger.info(`[XHS Video Debug] 发现视频笔记，视频数据对象: \n${JSON.stringify(noteData.video, null, 2)}`);
-        }
-        if (noteData.video.media?.stream?.h264?.[0]?.masterUrl) {
-            videoUrl = noteData.video.media.stream.h264[0].masterUrl;
-            if (config.logLevel === 'full') {
-                logger.info(`[XHS Video Debug] 已提取视频链接: ${videoUrl}`);
-            }
-        } else {
-            logger.warn('[XHS Video Debug] 未能从预期路径 `note.video.media.stream.h264[0].masterUrl` 找到视频链接。');
-        }
+      logger.debug(`[XHS Video Debug] 发现视频笔记，视频数据对象: \n${JSON.stringify(noteData.video, null, 2)}`);
+      if (noteData.video.media?.stream?.h264?.[0]?.masterUrl) {
+        videoUrl = noteData.video.media.stream.h264[0].masterUrl;
+        logger.debug(`[XHS Video Debug] 已提取视频链接: ${videoUrl}`);
+      } else {
+        logger.warn('[XHS Video Debug] 未能从预期路径 `note.video.media.stream.h264[0].masterUrl` 找到视频链接。');
+      }
 
       if (noteData.imageList && noteData.imageList.length > 0) {
         coverUrl = noteData.imageList[0].infoList.find(i => i.imageScene === 'WB_DETAIL_SHARE')?.url || noteData.imageList[0].infoList[1]?.url;
@@ -270,7 +263,7 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
       noteData.imageList.forEach((img) => {
         const imageUrl = img.infoList.find((i) => i.imageScene === 'WB_DETAIL_SHARE')?.url || img.infoList[1]?.url || img.url_default;
         if (imageUrl) {
-            images.push(imageUrl);
+          images.push(imageUrl);
         }
       });
     }

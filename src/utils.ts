@@ -1,3 +1,4 @@
+// src/utils.ts
 import {ParsedInfo, PluginConfig} from './types';
 import {Context, h, Logger, Session} from "koishi";
 import path from 'path';
@@ -10,6 +11,8 @@ import {Agent as HttpsAgent} from 'https';
 import {HttpProxyAgent} from 'http-proxy-agent';
 import {HttpsProxyAgent} from 'https-proxy-agent'
 import * as fs from "node:fs";
+import { createHash } from 'crypto';
+import 'koishi-plugin-adapter-onebot';
 
 /**
  * 将数字格式化为易读的字符串（如 万、亿）
@@ -47,7 +50,7 @@ export function unescapeHtml(str: string): string {
     .replace(/&amp;/g, '&');
 }
 
-function getProxyAgent(proxy: string | undefined, url: string): HttpAgent | HttpsAgent | undefined {
+export function getProxyAgent(proxy: string | undefined, url: string): HttpAgent | HttpsAgent | undefined {
   if (!proxy) return undefined;
 
   const u = new URL(url);
@@ -85,23 +88,61 @@ function parseHtmlToSegments(html: string): any[] {
 }
 
 async function downloadAndMapUrl(
+  ctx: Context,
   url: string,
   proxy: string | undefined,
   userAgent: string | undefined,
   localDownloadDir: string,
   onebotReadDir: string,
-  logger: Logger
+  logger: Logger,
+  enableCache: boolean
 ): Promise<string> {
   await fs.promises.mkdir(localDownloadDir, {recursive: true});
 
+  // 1. 计算 Hash
+  const hash = createHash('md5').update(url).digest('hex');
   const u = new URL(url);
   const ext = path.extname(u.pathname).split('?')[0] || '.bin';
-  const safeFilename = `${Date.now()}_${Math.random().toString(36).substring(2, 10)}${ext}`;
 
+  // 如果开启缓存，先查库
+  if (enableCache) {
+    try {
+      const cached = await ctx.database.get('sla_file_cache', hash);
+      if (cached.length > 0) {
+        const cachedPath = cached[0].path;
+        if (fs.existsSync(cachedPath)) {
+          const filename = path.basename(cachedPath);
+          const onebotPath = path.posix.join(onebotReadDir, filename);
+          logger.debug(`缓存命中: ${url} -> ${cachedPath}`);
+          return `file://${onebotPath}`;
+        } else {
+            // 数据库有记录但文件不存在，删除记录
+            await ctx.database.remove('sla_file_cache', { hash });
+        }
+      }
+    } catch (e) {
+      logger.warn(`读取文件缓存失败，将重新下载: ${e}`);
+    }
+  }
+
+  // 2. 生成文件名 (使用 Hash 以实现去重)
+  const safeFilename = `${hash}${ext}`;
   const actualPath = path.join(localDownloadDir, safeFilename);
   const onebotPath = path.posix.join(onebotReadDir, safeFilename);
-
   const fileUrl = `file://${onebotPath}`;
+
+  // 3. 检查本地文件是否存在 (双重保险，或者应对未清理的情况)
+  if (enableCache && fs.existsSync(actualPath)) {
+      // 补写数据库
+      await ctx.database.upsert('sla_file_cache', [{
+          hash,
+          path: actualPath,
+          url,
+          created_at: Date.now()
+      }]);
+      return fileUrl;
+  }
+
   return new Promise((resolve, reject) => {
     const agent = getProxyAgent(proxy, url);
     const headers = {
@@ -117,7 +158,7 @@ async function downloadAndMapUrl(
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         req.destroy();
         logger.debug(`重定向: ${url} -> ${res.headers.location}`);
-        downloadAndMapUrl(res.headers.location, proxy, userAgent, localDownloadDir, onebotReadDir, logger)
+        downloadAndMapUrl(ctx, res.headers.location, proxy, userAgent, localDownloadDir, onebotReadDir, logger, enableCache)
           .then(resolve)
           .catch(reject);
         return;
@@ -139,8 +180,21 @@ async function downloadAndMapUrl(
 
       const pipelineAsync = promisify(pipeline);
       pipelineAsync(res, createWriteStream(actualPath))
-        .then(() => {
+        .then(async () => {
           logger.debug(`下载成功: ${url} -> ${fileUrl}`);
+          // 下载成功，写入数据库缓存
+          if (enableCache) {
+             try {
+                 await ctx.database.upsert('sla_file_cache', [{
+                     hash,
+                     path: actualPath,
+                     url,
+                     created_at: Date.now()
+                 }]);
+             } catch (dbErr) {
+                 logger.warn(`写入文件缓存数据库失败: ${dbErr}`);
+             }
+          }
           resolve(fileUrl);
         })
         .catch((err) => {
@@ -276,14 +330,11 @@ export async function getEffectiveSettings(ctx: Context, guildId: string | undef
     };
   }
 
-  // @ts-ignore
   const data = await ctx.database.get('sla_group_settings', guildId);
   const record = data[0]
 
   // 合并：自定义设置覆盖默认
-  // @ts-ignore
   const effectiveParsers = {...config.default_parsers, ...record?.custom_parsers ? record.custom_parsers : {}};
-  // @ts-ignore
   const nsfw_enabled = record?.nsfw_enabled ? record.nsfw_enabled : config.allow_sensitive;
   return {
     parsers: effectiveParsers,
@@ -293,8 +344,10 @@ export async function getEffectiveSettings(ctx: Context, guildId: string | undef
 
 export async function isUserAdmin(session: Session, userId: string): Promise<boolean> {
   if (!session.guildId) return false;
-  // @ts-ignore
-  if (session.user?.authority >= 3) return true;
+
+  // 使用 (session.user as any) 来规避类型检查，同时保留可选链以防 user 为空
+  if ((session.user as any)?.authority >= 3) return true;
+
   try {
     const memberInfo = await session.bot.getGuildMember(session.guildId, userId);
     if (!memberInfo) return false;
@@ -311,10 +364,8 @@ export async function isUserAdmin(session: Session, userId: string): Promise<boo
   }
 }
 
-export async function sendResult_plain(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
-  if (config.logLevel === 'full') {
-    logger.info('进入普通发送');
-  }
+export async function sendResult_plain(ctx: Context, session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
+  logger.debug('进入普通发送');
 
   const localDownloadDir = config.localDownloadDir;
   const onebotReadDir = config.onebotReadDir;
@@ -325,16 +376,15 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
   let proxy = undefined;
   if (config.proxy_settings[result.platform as keyof typeof config.proxy_settings]) {
     proxy = config.proxy;
-    logger.info("正在使用代理");
+    logger.debug("正在使用代理");
   }
 
   // --- 下载封面 ---
   if (result.coverUrl) {
     if (config.usingLocal) {
       try {
-        mediaCoverUrl = await downloadAndMapUrl(result.coverUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
-
-        if (config.logLevel === 'full') logger.info(`封面已下载: ${mediaCoverUrl}`);
+        mediaCoverUrl = await downloadAndMapUrl(ctx, result.coverUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
+        logger.debug(`封面已下载: ${mediaCoverUrl}`);
       } catch (e) {
         logger.warn(`封面下载失败: ${result.coverUrl}`, e);
         mediaCoverUrl = result.coverUrl;
@@ -354,9 +404,9 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
         const remoteUrl = match[1];
         if (config.usingLocal) {
           try {
-            const localUrl = await downloadAndMapUrl(remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+            const localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
             urlMap[remoteUrl] = localUrl;
-            if (config.logLevel === 'full') logger.info(`正文图片已下载: ${localUrl}`);
+            logger.debug(`正文图片已下载: ${localUrl}`);
           } catch (e) {
             logger.warn(`正文图片下载失败: ${remoteUrl}`, e);
           }
@@ -385,9 +435,7 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
   // 清理空行
   const cleanMessage = message.split('\n').filter(line => line.trim() !== '' || line.includes('<')).join('\n');
 
-  if (config.logLevel === 'full') {
-    logger.info(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
-  }
+  logger.debug(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
 
   const sendPromises: Promise<any>[] = [];
 
@@ -408,19 +456,17 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
         const maxBytes = config.Max_size * 1024 * 1024;
         if (sizeBytes !== null && sizeBytes > maxBytes) {
           shouldSend = false;
-          if (config.logLevel !== 'none') {
-            const sizeMB = (sizeBytes / (1024 * 1024)).toFixed(2);
-            const maxMB = config.Max_size.toFixed(2);
-            sendPromises.push(session.send(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)`));
-            logger.info(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)，跳过: ${remoteUrl}`);
-          }
+          const sizeMB = (sizeBytes / (1024 * 1024)).toFixed(2);
+          const maxMB = config.Max_size.toFixed(2);
+          sendPromises.push(session.send(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)`));
+          logger.info(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)，跳过: ${remoteUrl}`);
         }
       }
 
       if (shouldSend) {
         try {
           let localUrl = remoteUrl
-          if (config.usingLocal) localUrl = await downloadAndMapUrl(remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+          if (config.usingLocal) localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
 
           if (!localUrl) continue;
 
@@ -437,14 +483,10 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
 
           if (element) {
             sendPromises.push(session.send(element));
-            if (config.logLevel === 'link_only') {
-              logger.info(`${type} 直链 (${result.platform}): ${remoteUrl}`);
-            }
-            if (config.logLevel === 'full') {
-              const size = await getFileSize(remoteUrl, proxy, config.userAgent, logger);
-              const sizeMB = size ? (size / (1024 * 1024)).toFixed(2) : 'unknown';
-              logger.info(`${type} 已发送 (${sizeMB} MB): ${localUrl}`);
-            }
+            logger.debug(`${type} 直链 (${result.platform}): ${remoteUrl}`);
+            const size = await getFileSize(remoteUrl, proxy, config.userAgent, logger);
+            const sizeMB = size ? (size / (1024 * 1024)).toFixed(2) : 'unknown';
+            logger.debug(`${type} 已发送 (${sizeMB} MB): ${localUrl}`);
           }
         } catch (e) {
           logger.warn(`${type} 下载/发送失败: ${remoteUrl}`, e);
@@ -456,10 +498,8 @@ export async function sendResult_plain(session: Session, config: PluginConfig, r
   await Promise.all(sendPromises);
 }
 
-export async function sendResult_forward(session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger, mixed_sending = false) {
-  if (config.logLevel === 'full') {
-    logger.info(mixed_sending ? '进入混合发送' : '进入合并发送');
-  }
+export async function sendResult_forward(ctx: Context, session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger, mixed_sending = false) {
+  logger.debug(mixed_sending ? '进入混合发送' : '进入合并发送');
 
   const localDownloadDir = config.localDownloadDir;
   const onebotReadDir = config.onebotReadDir;
@@ -477,7 +517,7 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
   if (result.coverUrl) {
     if (config.usingLocal) {
       try {
-        mediaCoverUrl = await downloadAndMapUrl(result.coverUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+        mediaCoverUrl = await downloadAndMapUrl(ctx, result.coverUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
       } catch (e) {
         logger.warn('封面下载失败', e);
         mediaCoverUrl = '';
@@ -494,7 +534,7 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
     await Promise.all(imgUrls.map(async (url) => {
         if (config.usingLocal) {
           try {
-            urlMap[url] = await downloadAndMapUrl(url, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+            urlMap[url] = await downloadAndMapUrl(ctx, url, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
           } catch (e) {
             logger.warn(`正文图片下载失败: ${url}`, e);
           }
@@ -511,7 +551,7 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
     }
   }
 
-  // === 主消息（不含媒体文件）===
+  // === 主消息 ===
   let message = config.format;
   message = message.replace(/{title}/g, result.title || '');
   message = message.replace(/{authorName}/g, result.authorName || '');
@@ -563,7 +603,7 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
     });
   }
 
-  // --- 处理 files 中的所有媒体 ---
+  // --- 处理 files ---
   const extraSendPromises: Promise<any>[] = [];
 
   if (config.sendFiles && Array.isArray(result.files)) {
@@ -577,30 +617,28 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
         const maxBytes = config.Max_size * 1024 * 1024;
         if (sizeBytes !== null && sizeBytes > maxBytes) {
           shouldInclude = false;
-          if (config.logLevel !== 'none') {
-            const sizeMB = (sizeBytes / (1024 * 1024)).toFixed(2);
-            const maxMB = config.Max_size.toFixed(2);
-            forwardNodes.push({
-              type: 'node',
-              data: {
-                user_id: session.selfId,
-                nickname: '分享助手',
-                content: {
-                  type: 'text', data: {
-                    text: `文件大小超限 (${sizeMB} MB > ${maxMB} MB)`
-                  }
+          const sizeMB = (sizeBytes / (1024 * 1024)).toFixed(2);
+          const maxMB = config.Max_size.toFixed(2);
+          forwardNodes.push({
+            type: 'node',
+            data: {
+              user_id: session.selfId,
+              nickname: '分享助手',
+              content: {
+                type: 'text', data: {
+                  text: `文件大小超限 (${sizeMB} MB > ${maxMB} MB)`
                 }
               }
-            });
-            logger.info(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)，跳过: ${remoteUrl}`);
-          }
+            }
+          });
+          logger.info(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)，跳过: ${remoteUrl}`);
         }
       }
 
       if (shouldInclude) {
         try {
           let localUrl = remoteUrl;
-          if (config.usingLocal) localUrl = await downloadAndMapUrl(remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger);
+          if (config.usingLocal) localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
           if (!localUrl) continue;
 
           if (!mixed_sending) {
@@ -637,9 +675,7 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
             }
           }
 
-          if (config.logLevel === 'link_only') {
-            logger.info(`${type} 直链 (${result.platform}): ${remoteUrl}`);
-          }
+          logger.debug(`${type} 直链 (${result.platform}): ${remoteUrl}`);
         } catch (e) {
           logger.warn(`${type} 下载失败: ${remoteUrl}`, e);
         }
@@ -664,9 +700,7 @@ export async function sendResult_forward(session: Session, config: PluginConfig,
 
   if (forwardNodes.length === 0 && extraSendPromises.length === 0) return;
 
-  if (config.logLevel === 'full') {
-    logger.info(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
-  }
+  logger.debug(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
 
   if (!(session.onebot && session.onebot._request)) throw new Error("Onebot is not defined");
 

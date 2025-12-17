@@ -80,7 +80,7 @@ export async function process(
     }
 
     try {
-        logger.info(`🔍 解析推文: ${apiUrl}`);
+        logger.debug(`🔍 解析推文: ${apiUrl}`);
         const tweetData = await ctx.http.get(apiUrl, {
             headers: {
                 'User-Agent': config.userAgent,
