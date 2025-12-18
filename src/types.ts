@@ -52,6 +52,8 @@ export interface PluginConfig {
   useNumeral: boolean;
   showError: boolean;
 
+  youtubeCookie?: string; // 手动设置的 YouTube Cookie
+
   // 代理设置
   proxy: string;
   proxy_settings: Record<string, boolean>;

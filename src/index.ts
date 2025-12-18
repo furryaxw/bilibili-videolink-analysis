@@ -68,6 +68,10 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
   }).description("高级解析设置"),
 
   Schema.object({
+    youtubeCookie: Schema.string().role('textarea').description("[YouTube 专用] 手动填入 Cookie 字符串。使用已登录账号的 Cookie 可大幅降低被拦截概率。<br>获取方式：浏览器F12 -> 网络 -> 刷新YouTube首页 -> 查看请求头中的 `cookie` 字段。"),
+  }).description("YouTube 设置"),
+
+  Schema.object({
     proxy: Schema.string().description("代理设置"),
     proxy_settings: Schema.object(
       Object.fromEntries(
@@ -97,7 +101,7 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
 ]) as any;
 
 export function apply(ctx: Context, config: PluginConfig) {
-  // 数据库模型定义 (无需 ts-ignore)
+  // 数据库模型定义
   ctx.model.extend('sla_cookie_cache', {
     platform: 'string', // 平台名称，如 'xiaohongshu'
     cookie: 'text',   // 存储的 cookie 字符串
@@ -133,6 +137,8 @@ export function apply(ctx: Context, config: PluginConfig) {
   if (config.debug) {
     logger.level = 3; // Debug Level
   }
+
+const pendingChecks = new Map<string, Promise<ParsedInfo | null>>();
 
   // 清理缓存函数
   const cleanExpiredCache = async () => {
@@ -292,10 +298,11 @@ export function apply(ctx: Context, config: PluginConfig) {
         await session.send(config.waitTip_Switch);
       }
 
-      // === 缓存逻辑 ===
+      // === 缓存与并发控制逻辑 ===
       let result: ParsedInfo | null = null;
       const cacheKey = `${link.platform}:${link.id}`;
 
+      // 1. 查持久化缓存 (DB)
       if (config.enableCache) {
         const cached = await ctx.database.get('sla_parse_cache', cacheKey);
         // 检查是否存在且未过期
@@ -313,23 +320,47 @@ export function apply(ctx: Context, config: PluginConfig) {
         }
       }
 
-      // 缓存未命中，执行解析
+      // 2. 查内存任务队列
       if (!result) {
-        result = await processLink(ctx, config, link, session);
+        if (pendingChecks.has(cacheKey)) {
+          logger.debug(`检测到正在进行的解析任务，正在等待合并结果: ${cacheKey}`);
+          // 如果有相同的任务正在进行，直接等待它的结果
+          result = await pendingChecks.get(cacheKey) || null;
+        } else {
+          // 如果没有，创建一个新的 Promise 任务
+          const task = (async () => {
+             try {
+               const res = await processLink(ctx, config, link, session);
+               // 解析成功且开启缓存，则写入 DB
+               if (res && config.enableCache) {
+                  await ctx.database.upsert('sla_parse_cache', [{
+                    key: cacheKey,
+                    data: res,
+                    created_at: Date.now()
+                  }]);
+               }
+               return res;
+             } catch (e) {
+               logger.warn(`解析任务出错: ${e}`);
+               return null;
+             }
+          })();
 
-        // 写入缓存
-        if (result && config.enableCache) {
-          await ctx.database.upsert('sla_parse_cache', [{
-            key: cacheKey,
-            data: result,
-            created_at: Date.now()
-          }]);
+          // 将任务存入 Map
+          pendingChecks.set(cacheKey, task);
+
+          try {
+            result = await task;
+          } finally {
+            // 无论成功失败，任务结束后从 Map 中移除
+            pendingChecks.delete(cacheKey);
+          }
         }
       }
-      // === 缓存逻辑结束 ===
+      // === 逻辑结束 ===
 
       if (result) {
-        lastProcessedUrls[channelId][link.url] = now;
+        lastProcessedUrls[channelId][link.url] = Date.now();
         await sendResult(ctx, session, config, result, logger);
       }
       linkCount++;

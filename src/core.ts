@@ -6,9 +6,10 @@ import * as Bilibili from './parsers/bilibili';
 import * as Xiaohongshu from './parsers/xiaohongshu';
 import * as Twitter from './parsers/twitter';
 import * as Xiaoheihe from './parsers/xiaoheihe';
+import * as Youtube from './parsers/youtube';
 
 // 定义所有支持的解析器
-const parsers = [Bilibili, Xiaohongshu, Twitter, Xiaoheihe];
+const parsers = [Bilibili, Xiaohongshu, Twitter, Xiaoheihe, Youtube];
 export const parsers_str = parsers.map(p => p.name);
 
 /**
