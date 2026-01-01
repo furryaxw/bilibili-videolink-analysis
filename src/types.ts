@@ -1,7 +1,5 @@
 // src/types.ts
 
-let session_global;
-
 // 定义解析出的链接基本信息
 export interface Link {
   platform: string;
@@ -71,12 +69,6 @@ export interface PluginConfig {
   // 性能监控设置
   reportEnabled: boolean;
   reportUrl: string;
-}
-
-// 定义发送结果的统计信息接口
-export interface SendResultStats {
-  downloadTime: number;
-  sendTime: number;
 }
 
 // Bilibili API 返回的视频信息类型定义 (部分)

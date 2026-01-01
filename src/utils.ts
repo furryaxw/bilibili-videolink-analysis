@@ -1,5 +1,5 @@
 // src/utils.ts
-import {ParsedInfo, PluginConfig, SendResultStats} from './types';
+import {ParsedInfo, PluginConfig} from './types';
 import {Context, h, Logger, Session} from "koishi";
 import path from 'path';
 import {createWriteStream} from 'fs';
@@ -237,14 +237,16 @@ async function tryHeadRequest(url: string, proxy: string | undefined, userAgent:
     const agent = getProxyAgent(proxy, url);
     const getter = u.protocol === 'https:' ? require('https').get : require('http').get;
 
+    const headers: Record<string, string | undefined> = { 'User-Agent': userAgent };
+    if (u.hostname.includes('bilibili.com')) {
+      headers['Referer'] = 'https://www.bilibili.com/';
+    }
+
     const req = getter(url, {
       agent,
       method: 'HEAD',
-      timeout: 10_000,
-      headers: {
-        'User-Agent': userAgent,
-        'Referer': 'https://www.bilibili.com/'
-      }
+      timeout: 5000,
+      headers: headers
     }, (res: any) => {
       const len = res.headers['content-length'];
       if (len && /^\d+$/.test(len)) {
@@ -270,19 +272,23 @@ async function tryHeadRequest(url: string, proxy: string | undefined, userAgent:
 }
 
 async function tryGetRequestForSize(url: string, proxy: string | undefined, userAgent: string | undefined, logger: Logger): Promise<number | null> {
-  proxy = undefined
   return new Promise((resolve) => {
     const u = new URL(url);
     const agent = getProxyAgent(proxy, url);
     const getter = u.protocol === 'https:' ? require('https').get : require('http').get;
 
+    const headers: Record<string, string | undefined> = {
+      'User-Agent': userAgent,
+      'Range': 'bytes=0-1023'
+    };
+    if (u.hostname.includes('bilibili.com')) {
+      headers['Referer'] = 'https://www.bilibili.com/';
+    }
+
     const req = getter(url, {
       agent,
-      timeout: 15_000,
-      headers: {
-        'User-Agent': userAgent,
-        'Range': 'bytes=0-1023' // 只请求前1KB
-      }
+      timeout: 5000,
+      headers: headers
     }, (res: any) => {
       const contentRange = res.headers['content-range'];
       if (contentRange) {
@@ -364,11 +370,41 @@ export async function isUserAdmin(session: Session, userId: string): Promise<boo
   }
 }
 
-export async function sendResult_plain(ctx: Context, session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger): Promise<SendResultStats> {
-  logger.debug('进入普通发送');
+export async function sendResult(
+  ctx: Context,
+  session: Session,
+  config: PluginConfig,
+  result: ParsedInfo,
+  logger: Logger,
+  statsRef: { downloadTime: number, sendTime: number } // 新增参数
+): Promise<void> {
+  if (!session.channel) {
+    await sendResult_plain(ctx, session, config, result, logger, statsRef);
+    return;
+  }
+  switch (config.useForward) {
+    case "plain":
+      await sendResult_plain(ctx, session, config, result, logger, statsRef);
+      break;
+    case 'forward':
+      await sendResult_forward(ctx, session, config, result, logger, false, statsRef);
+      break;
+    case "mixed":
+      await sendResult_forward(ctx, session, config, result, logger, true, statsRef);
+      break;
+  }
+}
 
-  let downloadTime = 0; // 下载耗时计时
-  let sendTime = 0;     // 发送耗时计时
+// 2. 修改 sendResult_plain
+export async function sendResult_plain(
+  ctx: Context,
+  session: Session,
+  config: PluginConfig,
+  result: ParsedInfo,
+  logger: Logger,
+  statsRef: { downloadTime: number, sendTime: number }
+): Promise<void> {
+  logger.debug('进入普通发送');
 
   const localDownloadDir = config.localDownloadDir;
   const onebotReadDir = config.onebotReadDir;
@@ -393,7 +429,7 @@ export async function sendResult_plain(ctx: Context, session: Session, config: P
         logger.warn(`封面下载失败: ${result.coverUrl}`, e);
         mediaCoverUrl = result.coverUrl;
       }
-      downloadTime += Date.now() - t; // 累加耗时
+      statsRef.downloadTime += Date.now() - t; // 累加耗时
     } else {
       mediaCoverUrl = result.coverUrl
     }
@@ -421,7 +457,7 @@ export async function sendResult_plain(ctx: Context, session: Session, config: P
         }
       })
     );
-    downloadTime += Date.now() - t; // 累加耗时
+    statsRef.downloadTime += Date.now() - t; // 累加耗时
 
     mediaMainbody = result.mainbody;
     for (const [remote, local] of Object.entries(urlMap)) {
@@ -461,16 +497,20 @@ export async function sendResult_plain(ctx: Context, session: Session, config: P
       if (config.Max_size !== undefined) {
         const t = Date.now();
         const sizeBytes = await getFileSize(remoteUrl, proxy, config.userAgent, logger);
-        downloadTime += Date.now() - t;
+        statsRef.downloadTime += Date.now() - t;
 
         const maxBytes = config.Max_size * 1024 * 1024;
-        if (sizeBytes !== null && sizeBytes > maxBytes) {
+
+        if (sizeBytes === null) {
+          shouldSend = false;
+          sendPromises.push(session.send(`无法获取文件大小，已跳过发送`));
+          logger.info(`获取文件大小失败，放弃发送: ${remoteUrl}`);
+        } else if (sizeBytes > maxBytes) {
           shouldSend = false;
           const sizeMB = (sizeBytes / (1024 * 1024)).toFixed(2);
           const maxMB = config.Max_size.toFixed(2);
           sendPromises.push(session.send(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)`));
           logger.info(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)，跳过: ${remoteUrl}`);
-          sendPromises.push(session.send(`文件大小超限...`));
         }
       }
 
@@ -480,7 +520,7 @@ export async function sendResult_plain(ctx: Context, session: Session, config: P
           if (config.usingLocal) {
             const t = Date.now();
             localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
-            downloadTime += Date.now() - t;
+            statsRef.downloadTime += Date.now() - t;
           }
 
           if (!localUrl) continue;
@@ -512,15 +552,19 @@ export async function sendResult_plain(ctx: Context, session: Session, config: P
 
   const tSend = Date.now(); // 发送计时开始
   await Promise.all(sendPromises);
-  sendTime = Date.now() - tSend; // 计算发送耗时
-
-  return {downloadTime, sendTime}; // 返回统计
+  statsRef.sendTime = Date.now() - tSend; // 计算发送耗时
 }
 
-export async function sendResult_forward(ctx: Context, session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger, mixed_sending = false): Promise<SendResultStats> {
+export async function sendResult_forward(
+  ctx: Context,
+  session: Session,
+  config: PluginConfig,
+  result: ParsedInfo,
+  logger: Logger,
+  mixed_sending = false,
+  statsRef: { downloadTime: number, sendTime: number } // 接收引用
+): Promise<void> {
   logger.debug(mixed_sending ? '进入混合发送' : '进入合并发送');
-  let downloadTime = 0;
-  let sendTime = 0;
 
   const localDownloadDir = config.localDownloadDir;
   const onebotReadDir = config.onebotReadDir;
@@ -544,7 +588,7 @@ export async function sendResult_forward(ctx: Context, session: Session, config:
         logger.warn('封面下载失败', e);
         mediaCoverUrl = '';
       }
-      downloadTime += Date.now() - t;
+      statsRef.downloadTime += Date.now() - t;
     } else {
       mediaCoverUrl = result.coverUrl
     }
@@ -562,7 +606,7 @@ export async function sendResult_forward(ctx: Context, session: Session, config:
           } catch (e) {
             logger.warn(`正文图片下载失败: ${url}`, e);
           }
-          downloadTime += Date.now() - t;
+          statsRef.downloadTime += Date.now() - t;
         } else {
           urlMap[url] = url
         }
@@ -640,10 +684,26 @@ export async function sendResult_forward(ctx: Context, session: Session, config:
       if (config.Max_size !== undefined) {
         const t = Date.now();
         const sizeBytes = await getFileSize(remoteUrl, proxy, config.userAgent, logger);
-        downloadTime += Date.now() - t;
+        statsRef.downloadTime += Date.now() - t;
 
         const maxBytes = config.Max_size * 1024 * 1024;
-        if (sizeBytes !== null && sizeBytes > maxBytes) {
+
+        if (sizeBytes === null) {
+          shouldInclude = false;
+          logger.warn(`获取文件大小失败，放弃发送: ${remoteUrl}`);
+          forwardNodes.push({
+            type: 'node',
+            data: {
+              user_id: session.selfId,
+              nickname: '分享助手',
+              content: {
+                type: 'text', data: {
+                  text: `无法获取文件大小，已跳过发送`
+                }
+              }
+            }
+          });
+        } else if (sizeBytes > maxBytes) {
           shouldInclude = false;
           const sizeMB = (sizeBytes / (1024 * 1024)).toFixed(2);
           const maxMB = config.Max_size.toFixed(2);
@@ -669,7 +729,7 @@ export async function sendResult_forward(ctx: Context, session: Session, config:
           if (config.usingLocal) {
              const t = Date.now();
             localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
-            downloadTime += Date.now() - t;
+            statsRef.downloadTime += Date.now() - t;
           }
           if (!localUrl) continue;
 
@@ -730,9 +790,7 @@ export async function sendResult_forward(ctx: Context, session: Session, config:
     }
   }
 
-  if (forwardNodes.length === 0 && extraSendPromises.length === 0) {
-      return { downloadTime, sendTime };
-  }
+  if (forwardNodes.length === 0 && extraSendPromises.length === 0) return
 
   logger.debug(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
 
@@ -759,8 +817,6 @@ export async function sendResult_forward(ctx: Context, session: Session, config:
   if (promises.length > 0) {
       const tSend = Date.now();
       await Promise.all(promises);
-      sendTime = Date.now() - tSend;
+      statsRef.sendTime = Date.now() - tSend;
   }
-
-  return { downloadTime, sendTime };
 }

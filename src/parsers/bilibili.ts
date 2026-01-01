@@ -1,6 +1,6 @@
 // src/parsers/bilibili.ts
 
-import {Context, h, Session} from 'koishi';
+import {Context, Session} from 'koishi';
 import {Link, ParsedInfo, PluginConfig, BilibiliVideoInfo, FileInfo} from '../types';
 import {escapeHtml, numeral} from '../utils';
 
@@ -8,11 +8,11 @@ export const name="bilibili";
 
 const linkRules = [
   {
-    pattern: /(?:https?:\/\/)?(?:www\.bilibili\.com\/video\/)(([ab]v[0-9a-zA-Z]+))/gi,
+    pattern: /(?:https?:\/\/)?www\.bilibili\.com\/video\/([ab]v[0-9a-zA-Z]+)/gi,
     type: "video" as const,
   },
   {
-    pattern: /(?:https?:\/\/)?(?:b23\.tv\/([0-9a-zA-Z]+))/gi,
+    pattern: /(?:https?:\/\/)?b23\.tv\/([0-9a-zA-Z]+)/gi,
     type: "short" as const,
   },
 ];

@@ -11,15 +11,15 @@ export const name="xiaohongshu";
 
 const linkRules = [
   {
-    pattern: /(?:https?:\/\/)?(?:www\.xiaohongshu\.com\/discovery\/item\/)([\w?=&\-.%]+)/gi,
+    pattern: /(?:https?:\/\/)?www\.xiaohongshu\.com\/discovery\/item\/([\w?=&\-.%]+)/gi,
     type: "discovery" as const,
   },
   {
-    pattern: /(?:https?:\/\/)?(?:www\.xiaohongshu\.com\/explore\/)([\w?=&\-.%]+)/gi,
+    pattern: /(?:https?:\/\/)?www\.xiaohongshu\.com\/explore\/([\w?=&\-.%]+)/gi,
     type: "explore" as const,
   },
   {
-    pattern: /(?:https?:\/\/)?(?:xhslink\.com\/(?:\w\/)?)([0-9a-zA-Z]+)/gi,
+    pattern: /(?:https?:\/\/)?xhslink\.com\/(?:\w\/)?([0-9a-zA-Z]+)/gi,
     type: "short" as const,
   },
 ];

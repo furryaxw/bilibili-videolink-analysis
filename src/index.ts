@@ -1,9 +1,9 @@
 // src/index.ts
 
-import {Context, Schema, Logger, Session} from 'koishi';
+import {Context, Schema} from 'koishi';
 import {resolveLinks, processLink, init, parsers_str} from './core';
-import {ParsedInfo, PluginConfig, SendResultStats} from './types';
-import {getEffectiveSettings, isUserAdmin, sendResult_forward, sendResult_plain} from './utils';
+import {ParsedInfo, PluginConfig} from './types';
+import {getEffectiveSettings, isUserAdmin, sendResult} from './utils';
 import * as fs from 'node:fs';
 
 export const name = 'share-links-analysis';
@@ -121,22 +121,6 @@ async function reportMetric(ctx: Context, config: PluginConfig, payload: Record<
       ctx.logger('share-links-analysis').warn(`性能数据上报失败: ${e.message}`);
     }
   });
-}
-
-async function sendResult(ctx: Context, session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger): Promise<SendResultStats> {
-  if (!session.channel) {
-    return await sendResult_plain(ctx, session, config, result, logger);
-  }
-  switch (config.useForward) {
-    case "plain":
-      return await sendResult_plain(ctx, session, config, result, logger);
-    case 'forward':
-      return await sendResult_forward(ctx, session, config, result, logger, false);
-    case "mixed":
-      return await sendResult_forward(ctx, session, config, result, logger, true);
-    default:
-      return {downloadTime: 0, sendTime: 0};
-  }
 }
 
 export function apply(ctx: Context, config: PluginConfig) {
@@ -340,9 +324,8 @@ export function apply(ctx: Context, config: PluginConfig) {
 
       // === 性能统计变量 ===
       const startTotal = Date.now();
+      const timeStats = { downloadTime: 0, sendTime: 0 };
       let parseTime = 0;
-      let downloadTime = 0;
-      let sendTime = 0;
       let isCache = false;
       let status = "success";
       let errorMsg = "";
@@ -424,9 +407,7 @@ export function apply(ctx: Context, config: PluginConfig) {
 
         if (result) {
           lastProcessedUrls[channelId][link.url] = Date.now();
-          const stats = await sendResult(ctx, session, config, result, logger);
-          downloadTime = stats.downloadTime;
-          sendTime = stats.sendTime;
+          await sendResult(ctx, session, config, result, logger, timeStats);
         } else {
           status = "failed";
           errorMsg = "parser_returned_null";
@@ -477,8 +458,8 @@ export function apply(ctx: Context, config: PluginConfig) {
           // === Metrics (数值/指标) ===
           time_total_ms: totalTime,
           time_parse_ms: parseTime,
-          time_download_ms: downloadTime,
-          time_send_ms: sendTime,
+          time_download_ms: timeStats.downloadTime,
+          time_send_ms: timeStats.sendTime,
 
           // 系统负载指标
           memory_rss_mb: parseFloat(rssMB), // 当前进程内存占用

@@ -176,7 +176,7 @@ export async function process(
         contentBlocks.push({type: 'text', content: mainContent});
 
         // 图片（轮播图）
-        container.querySelectorAll('.header-image__item-image img').forEach((img, index) => {
+        container.querySelectorAll('.header-image__item-image img').forEach((img) => {
           const src = (img as HTMLImageElement).src.replace(/\?.*$/, '');
           contentBlocks.push({type: 'image', content: src});
         });
