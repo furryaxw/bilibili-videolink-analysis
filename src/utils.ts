@@ -1,5 +1,5 @@
 // src/utils.ts
-import {ParsedInfo, PluginConfig} from './types';
+import {ParsedInfo, PluginConfig, SendResultStats} from './types';
 import {Context, h, Logger, Session} from "koishi";
 import path from 'path';
 import {createWriteStream} from 'fs';
@@ -11,7 +11,7 @@ import {Agent as HttpsAgent} from 'https';
 import {HttpProxyAgent} from 'http-proxy-agent';
 import {HttpsProxyAgent} from 'https-proxy-agent'
 import * as fs from "node:fs";
-import { createHash } from 'crypto';
+import {createHash} from 'crypto';
 import 'koishi-plugin-adapter-onebot';
 
 /**
@@ -116,8 +116,8 @@ async function downloadAndMapUrl(
           logger.debug(`缓存命中: ${url} -> ${cachedPath}`);
           return `file://${onebotPath}`;
         } else {
-            // 数据库有记录但文件不存在，删除记录
-            await ctx.database.remove('sla_file_cache', { hash });
+          // 数据库有记录但文件不存在，删除记录
+          await ctx.database.remove('sla_file_cache', {hash});
         }
       }
     } catch (e) {
@@ -133,14 +133,14 @@ async function downloadAndMapUrl(
 
   // 3. 检查本地文件是否存在 (双重保险，或者应对未清理的情况)
   if (enableCache && fs.existsSync(actualPath)) {
-      // 补写数据库
-      await ctx.database.upsert('sla_file_cache', [{
-          hash,
-          path: actualPath,
-          url,
-          created_at: Date.now()
-      }]);
-      return fileUrl;
+    // 补写数据库
+    await ctx.database.upsert('sla_file_cache', [{
+      hash,
+      path: actualPath,
+      url,
+      created_at: Date.now()
+    }]);
+    return fileUrl;
   }
 
   return new Promise((resolve, reject) => {
@@ -184,16 +184,16 @@ async function downloadAndMapUrl(
           logger.debug(`下载成功: ${url} -> ${fileUrl}`);
           // 下载成功，写入数据库缓存
           if (enableCache) {
-             try {
-                 await ctx.database.upsert('sla_file_cache', [{
-                     hash,
-                     path: actualPath,
-                     url,
-                     created_at: Date.now()
-                 }]);
-             } catch (dbErr) {
-                 logger.warn(`写入文件缓存数据库失败: ${dbErr}`);
-             }
+            try {
+              await ctx.database.upsert('sla_file_cache', [{
+                hash,
+                path: actualPath,
+                url,
+                created_at: Date.now()
+              }]);
+            } catch (dbErr) {
+              logger.warn(`写入文件缓存数据库失败: ${dbErr}`);
+            }
           }
           resolve(fileUrl);
         })
@@ -364,8 +364,11 @@ export async function isUserAdmin(session: Session, userId: string): Promise<boo
   }
 }
 
-export async function sendResult_plain(ctx: Context, session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
+export async function sendResult_plain(ctx: Context, session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger): Promise<SendResultStats> {
   logger.debug('进入普通发送');
+
+  let downloadTime = 0; // 下载耗时计时
+  let sendTime = 0;     // 发送耗时计时
 
   const localDownloadDir = config.localDownloadDir;
   const onebotReadDir = config.onebotReadDir;
@@ -382,6 +385,7 @@ export async function sendResult_plain(ctx: Context, session: Session, config: P
   // --- 下载封面 ---
   if (result.coverUrl) {
     if (config.usingLocal) {
+      const t = Date.now(); // 计时开始
       try {
         mediaCoverUrl = await downloadAndMapUrl(ctx, result.coverUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
         logger.debug(`封面已下载: ${mediaCoverUrl}`);
@@ -389,13 +393,15 @@ export async function sendResult_plain(ctx: Context, session: Session, config: P
         logger.warn(`封面下载失败: ${result.coverUrl}`, e);
         mediaCoverUrl = result.coverUrl;
       }
+      downloadTime += Date.now() - t; // 累加耗时
     } else {
       mediaCoverUrl = result.coverUrl
     }
   }
 
   // --- 下载 mainbody 中的图片 ---
-  if (result.mainbody) {
+  if (result.mainbody && config.usingLocal) {
+    const t = Date.now(); // 计时开始
     const imgMatches = [...result.mainbody.matchAll(/<img\s[^>]*src\s*=\s*["']?([^"'>\s]+)["']?/gi)];
     const urlMap: Record<string, string> = {};
 
@@ -415,6 +421,7 @@ export async function sendResult_plain(ctx: Context, session: Session, config: P
         }
       })
     );
+    downloadTime += Date.now() - t; // 累加耗时
 
     mediaMainbody = result.mainbody;
     for (const [remote, local] of Object.entries(urlMap)) {
@@ -452,7 +459,10 @@ export async function sendResult_plain(ctx: Context, session: Session, config: P
 
       let shouldSend = true;
       if (config.Max_size !== undefined) {
+        const t = Date.now();
         const sizeBytes = await getFileSize(remoteUrl, proxy, config.userAgent, logger);
+        downloadTime += Date.now() - t;
+
         const maxBytes = config.Max_size * 1024 * 1024;
         if (sizeBytes !== null && sizeBytes > maxBytes) {
           shouldSend = false;
@@ -460,13 +470,18 @@ export async function sendResult_plain(ctx: Context, session: Session, config: P
           const maxMB = config.Max_size.toFixed(2);
           sendPromises.push(session.send(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)`));
           logger.info(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)，跳过: ${remoteUrl}`);
+          sendPromises.push(session.send(`文件大小超限...`));
         }
       }
 
       if (shouldSend) {
         try {
           let localUrl = remoteUrl
-          if (config.usingLocal) localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
+          if (config.usingLocal) {
+            const t = Date.now();
+            localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
+            downloadTime += Date.now() - t;
+          }
 
           if (!localUrl) continue;
 
@@ -495,11 +510,17 @@ export async function sendResult_plain(ctx: Context, session: Session, config: P
     }
   }
 
+  const tSend = Date.now(); // 发送计时开始
   await Promise.all(sendPromises);
+  sendTime = Date.now() - tSend; // 计算发送耗时
+
+  return {downloadTime, sendTime}; // 返回统计
 }
 
-export async function sendResult_forward(ctx: Context, session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger, mixed_sending = false) {
+export async function sendResult_forward(ctx: Context, session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger, mixed_sending = false): Promise<SendResultStats> {
   logger.debug(mixed_sending ? '进入混合发送' : '进入合并发送');
+  let downloadTime = 0;
+  let sendTime = 0;
 
   const localDownloadDir = config.localDownloadDir;
   const onebotReadDir = config.onebotReadDir;
@@ -516,12 +537,14 @@ export async function sendResult_forward(ctx: Context, session: Session, config:
   // --- 封面 ---
   if (result.coverUrl) {
     if (config.usingLocal) {
+      const t = Date.now();
       try {
         mediaCoverUrl = await downloadAndMapUrl(ctx, result.coverUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
       } catch (e) {
         logger.warn('封面下载失败', e);
         mediaCoverUrl = '';
       }
+      downloadTime += Date.now() - t;
     } else {
       mediaCoverUrl = result.coverUrl
     }
@@ -533,11 +556,13 @@ export async function sendResult_forward(ctx: Context, session: Session, config:
     const urlMap: Record<string, string> = {};
     await Promise.all(imgUrls.map(async (url) => {
         if (config.usingLocal) {
+          const t = Date.now();
           try {
             urlMap[url] = await downloadAndMapUrl(ctx, url, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
           } catch (e) {
             logger.warn(`正文图片下载失败: ${url}`, e);
           }
+          downloadTime += Date.now() - t;
         } else {
           urlMap[url] = url
         }
@@ -613,7 +638,10 @@ export async function sendResult_forward(ctx: Context, session: Session, config:
 
       let shouldInclude = true;
       if (config.Max_size !== undefined) {
+        const t = Date.now();
         const sizeBytes = await getFileSize(remoteUrl, proxy, config.userAgent, logger);
+        downloadTime += Date.now() - t;
+
         const maxBytes = config.Max_size * 1024 * 1024;
         if (sizeBytes !== null && sizeBytes > maxBytes) {
           shouldInclude = false;
@@ -638,7 +666,11 @@ export async function sendResult_forward(ctx: Context, session: Session, config:
       if (shouldInclude) {
         try {
           let localUrl = remoteUrl;
-          if (config.usingLocal) localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
+          if (config.usingLocal) {
+             const t = Date.now();
+            localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
+            downloadTime += Date.now() - t;
+          }
           if (!localUrl) continue;
 
           if (!mixed_sending) {
@@ -698,7 +730,9 @@ export async function sendResult_forward(ctx: Context, session: Session, config:
     }
   }
 
-  if (forwardNodes.length === 0 && extraSendPromises.length === 0) return;
+  if (forwardNodes.length === 0 && extraSendPromises.length === 0) {
+      return { downloadTime, sendTime };
+  }
 
   logger.debug(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
 
@@ -717,9 +751,16 @@ export async function sendResult_forward(ctx: Context, session: Session, config:
     }));
   }
 
+  // 混合模式额外消息
   if (mixed_sending && extraSendPromises.length > 0) {
     promises.push(...extraSendPromises);
   }
 
-  await Promise.all(promises);
+  if (promises.length > 0) {
+      const tSend = Date.now();
+      await Promise.all(promises);
+      sendTime = Date.now() - tSend;
+  }
+
+  return { downloadTime, sendTime };
 }

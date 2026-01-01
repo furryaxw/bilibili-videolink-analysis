@@ -67,6 +67,16 @@ export interface PluginConfig {
   // 调试设置
   userAgent: string;
   debug: boolean;
+
+  // 性能监控设置
+  reportEnabled: boolean;
+  reportUrl: string;
+}
+
+// 定义发送结果的统计信息接口
+export interface SendResultStats {
+  downloadTime: number;
+  sendTime: number;
 }
 
 // Bilibili API 返回的视频信息类型定义 (部分)

@@ -2,7 +2,7 @@
 
 import {Context, Schema, Logger, Session} from 'koishi';
 import {resolveLinks, processLink, init, parsers_str} from './core';
-import {ParsedInfo, PluginConfig} from './types';
+import {ParsedInfo, PluginConfig, SendResultStats} from './types';
 import {getEffectiveSettings, isUserAdmin, sendResult_forward, sendResult_plain} from './utils';
 import * as fs from 'node:fs';
 
@@ -98,7 +98,46 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
     userAgent: Schema.string().description("所有 API 请求所用的 User-Agent").default("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
     debug: Schema.boolean().default(false).description("开启调试模式 (输出详细日志)"),
   }).description("调试设置"),
+
+  Schema.object({
+    reportEnabled: Schema.boolean().default(false).description("开启性能数据上报"),
+    reportUrl: Schema.string().default("http://127.0.0.1:8080/").description("性能数据上报地址 (HTTP POST)"),
+  }).description("性能监控"),
 ]) as any;
+
+async function reportMetric(ctx: Context, config: PluginConfig, payload: Record<string, any>) {
+  if (!config.reportEnabled || !config.reportUrl) return;
+
+  const data = {
+    app: "share_links_analysis", // 必填 app 标识
+    timestamp: Math.floor(Date.now() / 1000), // 可选时间戳
+    ...payload
+  };
+
+  // 异步发送，不阻塞主流程
+  ctx.http.post(config.reportUrl, data).catch(e => {
+    // 仅在调试模式下打印上报错误，避免刷屏
+    if (config.debug) {
+      ctx.logger('share-links-analysis').warn(`性能数据上报失败: ${e.message}`);
+    }
+  });
+}
+
+async function sendResult(ctx: Context, session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger): Promise<SendResultStats> {
+  if (!session.channel) {
+    return await sendResult_plain(ctx, session, config, result, logger);
+  }
+  switch (config.useForward) {
+    case "plain":
+      return await sendResult_plain(ctx, session, config, result, logger);
+    case 'forward':
+      return await sendResult_forward(ctx, session, config, result, logger, false);
+    case "mixed":
+      return await sendResult_forward(ctx, session, config, result, logger, true);
+    default:
+      return {downloadTime: 0, sendTime: 0};
+  }
+}
 
 export function apply(ctx: Context, config: PluginConfig) {
   // 数据库模型定义
@@ -122,7 +161,7 @@ export function apply(ctx: Context, config: PluginConfig) {
     key: 'string', // platform + ':' + id
     data: 'json',
     created_at: 'double',
-  }, { primary: 'key' });
+  }, {primary: 'key'});
 
   // 资源文件缓存 (hash)
   ctx.model.extend('sla_file_cache', {
@@ -130,7 +169,7 @@ export function apply(ctx: Context, config: PluginConfig) {
     path: 'string', // 本地绝对路径
     url: 'string',
     created_at: 'double',
-  }, { primary: 'hash' });
+  }, {primary: 'hash'});
 
   const logger = ctx.logger('share-links-analysis');
   // 根据配置设置日志等级
@@ -138,7 +177,7 @@ export function apply(ctx: Context, config: PluginConfig) {
     logger.level = 3; // Debug Level
   }
 
-const pendingChecks = new Map<string, Promise<ParsedInfo | null>>();
+  const pendingChecks = new Map<string, Promise<ParsedInfo | null>>();
 
   // 清理缓存函数
   const cleanExpiredCache = async () => {
@@ -148,12 +187,12 @@ const pendingChecks = new Map<string, Promise<ParsedInfo | null>>();
 
     // 清理解析缓存
     await ctx.database.remove('sla_parse_cache', {
-      created_at: { $lt: threshold }
+      created_at: {$lt: threshold}
     });
 
     // 清理文件缓存
     const expiredFiles = await ctx.database.get('sla_file_cache', {
-      created_at: { $lt: threshold }
+      created_at: {$lt: threshold}
     });
 
     for (const file of expiredFiles) {
@@ -167,7 +206,7 @@ const pendingChecks = new Map<string, Promise<ParsedInfo | null>>();
     }
 
     await ctx.database.remove('sla_file_cache', {
-      created_at: { $lt: threshold }
+      created_at: {$lt: threshold}
     });
 
     if (expiredFiles.length > 0) {
@@ -234,16 +273,17 @@ const pendingChecks = new Map<string, Promise<ParsedInfo | null>>();
 
   // 清除缓存指令
   cmd.subcommand('.clean', '清除所有缓存和文件', {authority: 3})
-    .action(async ({session}) => {
+    .action(async () => {
       await ctx.database.remove('sla_parse_cache', {});
 
       const allFiles = await ctx.database.get('sla_file_cache', {});
       for (const file of allFiles) {
         try {
           if (fs.existsSync(file.path)) {
-             await fs.promises.unlink(file.path);
+            await fs.promises.unlink(file.path);
           }
-        } catch {}
+        } catch {
+        }
       }
       await ctx.database.remove('sla_file_cache', {});
       return '缓存及对应文件已清理。';
@@ -298,90 +338,153 @@ const pendingChecks = new Map<string, Promise<ParsedInfo | null>>();
         await session.send(config.waitTip_Switch);
       }
 
+      // === 性能统计变量 ===
+      const startTotal = Date.now();
+      let parseTime = 0;
+      let downloadTime = 0;
+      let sendTime = 0;
+      let isCache = false;
+      let status = "success";
+      let errorMsg = "";
+      let errorStack = "";
+
       // === 缓存与并发控制逻辑 ===
       let result: ParsedInfo | null = null;
       const cacheKey = `${link.platform}:${link.id}`;
 
-      // 1. 查持久化缓存 (DB)
-      if (config.enableCache) {
-        const cached = await ctx.database.get('sla_parse_cache', cacheKey);
-        // 检查是否存在且未过期
-        if (cached.length > 0) {
-           const entry = cached[0];
-           const isExpired = config.cacheExpiration > 0 && (Date.now() - entry.created_at > config.cacheExpiration * 60 * 60 * 1000);
+      try {
+        // 1. 查持久化缓存 (DB)
+        if (config.enableCache) {
+          const cached = await ctx.database.get('sla_parse_cache', cacheKey);
+          // 检查是否存在且未过期
+          if (cached.length > 0) {
+            const entry = cached[0];
+            const isExpired = config.cacheExpiration > 0 && (Date.now() - entry.created_at > config.cacheExpiration * 60 * 60 * 1000);
 
-           if (!isExpired) {
-             logger.debug(`使用缓存解析结果: ${cacheKey}`);
-             result = entry.data;
-           } else {
-             // 过期删除
-             await ctx.database.remove('sla_parse_cache', { key: cacheKey });
-           }
+            if (!isExpired) {
+              logger.debug(`使用缓存解析结果: ${cacheKey}`);
+              result = entry.data;
+              isCache = true;
+            } else {
+              // 过期删除
+              await ctx.database.remove('sla_parse_cache', {key: cacheKey});
+            }
+          }
         }
-      }
 
-      // 2. 查内存任务队列
-      if (!result) {
-        if (pendingChecks.has(cacheKey)) {
-          logger.debug(`检测到正在进行的解析任务，正在等待合并结果: ${cacheKey}`);
-          // 如果有相同的任务正在进行，直接等待它的结果
-          result = await pendingChecks.get(cacheKey) || null;
-        } else {
-          // 如果没有，创建一个新的 Promise 任务
-          const task = (async () => {
+        // 2. 查内存任务队列
+        if (!result) {
+          if (pendingChecks.has(cacheKey)) {
+            logger.debug(`检测到正在进行的解析任务，正在等待合并结果: ${cacheKey}`);
+            // 如果有相同的任务正在进行，直接等待它的结果
              try {
-               const res = await processLink(ctx, config, link, session);
-               // 解析成功且开启缓存，则写入 DB
-               if (res && config.enableCache) {
+                result = await pendingChecks.get(cacheKey) || null;
+             } catch (e: any) {
+                // 如果等待的任务失败了，这里也会捕获到
+                throw e;
+             }
+          } else {
+            // 如果没有，创建一个新的 Promise 任务
+            const task = (async () => {
+              const t = Date.now();
+              try {
+                const res = await processLink(ctx, config, link, session);
+
+                // 解析成功且开启缓存，则写入 DB
+                if (res && config.enableCache) {
                   await ctx.database.upsert('sla_parse_cache', [{
                     key: cacheKey,
                     data: res,
                     created_at: Date.now()
                   }]);
-               }
-               return res;
-             } catch (e) {
-               logger.warn(`解析任务出错: ${e}`);
-               return null;
-             }
-          })();
+                }
+                return res;
+              } catch (e: any) {
+                logger.warn(`解析任务出错: ${e}`);
+                throw e;
+              } finally {
+                // 执行上报
+                // 无论成功失败，都在 finally 中上报数据
+                parseTime = Date.now() - t;
+              }
+            })();
 
-          // 将任务存入 Map
-          pendingChecks.set(cacheKey, task);
+            // 将任务存入 Map
+            pendingChecks.set(cacheKey, task);
 
-          try {
-            result = await task;
-          } finally {
-            // 无论成功失败，任务结束后从 Map 中移除
-            pendingChecks.delete(cacheKey);
+            try {
+              result = await task;
+            } finally {
+              // 无论成功失败，任务结束后从 Map 中移除
+              pendingChecks.delete(cacheKey);
+            }
           }
         }
-      }
-      // === 逻辑结束 ===
+        // === 逻辑结束 ===
 
-      if (result) {
-        lastProcessedUrls[channelId][link.url] = Date.now();
-        await sendResult(ctx, session, config, result, logger);
+        if (result) {
+          lastProcessedUrls[channelId][link.url] = Date.now();
+          const stats = await sendResult(ctx, session, config, result, logger);
+          downloadTime = stats.downloadTime;
+          sendTime = stats.sendTime;
+        } else {
+          status = "failed";
+          errorMsg = "parser_returned_null";
+          // 即使没有抛错，如果返回 null，也可以视为一种“软失败”，记录一下
+        }
+        linkCount++;
+      } catch (e: any) {
+        status = "error";
+        errorMsg = e.message || String(e);
+        errorStack = e.stack || String(e);
+        logger.warn(`处理异常: ${e}`);
+      } finally {
+        // 4. 上报数据
+        const totalTime = Date.now() - startTotal;
+
+        // 获取内存使用情况 (MB)
+        const memoryUsage = process.memoryUsage();
+        const rssMB = (memoryUsage.rss / 1024 / 1024).toFixed(2);
+
+        // 截取堆栈前 1000 个字符，防止数据包过大（根据您的后端数据库限制调整）
+        const truncatedStack = errorStack.length > 1000 ? errorStack.substring(0, 1000) + "..." : errorStack;
+
+        reportMetric(ctx, config, {
+          type: "link_process", // 业务类型
+
+          // Tags
+          platform: link.platform,
+          status: status,
+          is_cache: isCache.toString(),
+          using_local: config.usingLocal.toString(),
+          user_id: session.userId || "unknown",
+
+          // [新增] 上下文信息，帮助定位是哪个群/频道
+          guild_id: session.guildId || "private",
+          channel_id: session.channelId || "unknown",
+
+          // [新增] 核心复现数据：具体的 URL
+          // 注意：如果您的后端是时序数据库(InfluxDB等)，URL作为Tag可能会导致基数爆炸(High Cardinality)。
+          // 但根据您的描述是存入 tags 列用于筛选，且为内网服务，通常问题不大。
+          target_url: link.url,
+
+          // [新增] 错误信息
+          error_msg: errorMsg,
+          // 建议将堆栈放入 tags (如果数据库支持长文本) 或者单独的 log 字段
+          // 这里放入 tags 供查阅
+          error_stack: status === 'error' ? truncatedStack : "",
+
+          // === Metrics (数值/指标) ===
+          time_total_ms: totalTime,
+          time_parse_ms: parseTime,
+          time_download_ms: downloadTime,
+          time_send_ms: sendTime,
+
+          // 系统负载指标
+          memory_rss_mb: parseFloat(rssMB), // 当前进程内存占用
+          concurrent_tasks: pendingChecks.size, // 当前正在进行的并发解析数
+        });
       }
-      linkCount++;
     }
   });
-}
-
-async function sendResult(ctx: Context, session: Session, config: PluginConfig, result: ParsedInfo, logger: Logger) {
-  if (!session.channel) {
-    await sendResult_plain(ctx, session, config, result, logger);
-    return;
-  }
-  switch (config.useForward) {
-    case "plain":
-      await sendResult_plain(ctx, session, config, result, logger);
-      return;
-    case 'forward':
-      await sendResult_forward(ctx, session, config, result, logger, false);
-      return;
-    case "mixed":
-      await sendResult_forward(ctx, session, config, result, logger, true);
-      return;
-  }
 }
