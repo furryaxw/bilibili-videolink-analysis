@@ -8,7 +8,7 @@ export const name="bilibili";
 
 const linkRules = [
   {
-    pattern: /(?:https?:\/\/)?www\.bilibili\.com\/video\/([ab]v[0-9a-zA-Z]+)/gi,
+    pattern: /(?:https?:\/\/)?(www)?m?\.bilibili\.com\/video\/([ab]v[0-9a-zA-Z]+)/gi,
     type: "video" as const,
   },
   {
