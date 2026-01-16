@@ -61,7 +61,7 @@ export async function init(ctx: Context, config: PluginConfig) {
             try {
                 await parser.init(ctx, config);
             } catch (e) {
-                console.error(`[Init Failed] Parser: ${parser.name || 'Unknown'}`, e);
+                ctx.logger('share-links-analysis').error(`[Init Failed] Parser: ${parser.name || 'Unknown'}`, e);
             }
         }
     });

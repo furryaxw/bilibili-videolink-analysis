@@ -82,28 +82,59 @@ function extractTweetContent(data: any, config: PluginConfig) {
     }
 
     // 2. 视频 (Video)
-    // Syndication API 将视频放在 video.variants 中
-    // 或者是 mediaDetails (旧版)
-    const videoObj = data.video || data.mediaDetails?.[0];
+    // 优先从 mediaDetails 获取，因为它包含 bitrate 信息且结构更完整
+    let videoVariants: any[] = [];
+    let videoPoster = '';
 
-    if (videoObj && videoObj.variants) {
-        // 筛选 mp4 格式
-        const variants = videoObj.variants.filter((v: any) => v.content_type === 'video/mp4');
+    if (data.mediaDetails && Array.isArray(data.mediaDetails)) {
+        for (const media of data.mediaDetails) {
+            if (media.type === 'video' || media.type === 'animated_gif') {
+                // 获取封面 (mediaDetails 中通常是 media_url_https)
+                if (!videoPoster) videoPoster = media.media_url_https;
+
+                // 获取变体
+                if (media.video_info && media.video_info.variants) {
+                    videoVariants.push(...media.video_info.variants);
+                }
+            }
+        }
+    }
+
+    // 如果 mediaDetails 中没有找到视频，尝试回退到 data.video (简略版，通常无 bitrate)
+    if (videoVariants.length === 0 && data.video && data.video.variants) {
+        videoVariants = data.video.variants;
+        if (!videoPoster) videoPoster = data.video.poster;
+    }
+
+    if (videoVariants.length > 0) {
+        // 筛选 mp4 格式，兼容 content_type 和 type 字段
+        const mp4Variants = videoVariants.filter((v: any) => {
+            const type = v.content_type || v.type;
+            return type === 'video/mp4';
+        });
+
         let bestVariant = null;
 
-        if (variants.length > 0) {
+        if (mp4Variants.length > 0) {
+            // 排序逻辑
             if (config.Video_ClarityPriority === '2') {
-                // 高清晰度优先: 按 bitrate 降序 (大 -> 小)，取第一个
-                bestVariant = variants.sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+                // 高清晰度优先: 按 bitrate 降序
+                // 注意：如果使用 data.video 回退，bitrate 可能为 undefined，此时顺序可能不稳定
+                bestVariant = mp4Variants.sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
             } else {
-                // 低清晰度优先: 按 bitrate 升序 (小 -> 大)，取第一个
-                bestVariant = variants.sort((a: any, b: any) => (a.bitrate || 0) - (b.bitrate || 0))[0];
+                // 低清晰度优先: 按 bitrate 升序
+                bestVariant = mp4Variants.sort((a: any, b: any) => (a.bitrate || 0) - (b.bitrate || 0))[0];
             }
         }
 
         if (bestVariant) {
-            files.push({type: 'video', url: bestVariant.src || bestVariant.url});
-            if (!cover) cover = videoObj.poster;
+            // 兼容 url 和 src 字段
+            const videoUrl = bestVariant.url || bestVariant.src;
+            if (videoUrl) {
+                files.push({type: 'video', url: videoUrl});
+                // 如果还没有封面（例如没有图片），使用视频封面
+                if (!cover && videoPoster) cover = videoPoster;
+            }
         }
     }
 
@@ -130,7 +161,7 @@ export async function process(
 ): Promise<ParsedInfo | null> {
     const logger = ctx.logger(`share-links-analysis:${name}`);
 
-    // 处理短链接：通过 HEAD 请求获取真实 ID
+    // 处理短链接
     let tweetId = link.id;
     if (link.type === 'short') {
         try {
@@ -152,7 +183,7 @@ export async function process(
         logger.debug(`请求 API: ${apiUrl}`);
         const data = await ctx.http.get(apiUrl, {
             headers: {
-                'User-Agent': config.userAgent, // 必须设置 UA
+                'User-Agent': config.userAgent,
                 'Accept': '*/*'
             }
         });
@@ -177,7 +208,7 @@ export async function process(
         // 解析主推文
         const main = extractTweetContent(data, config);
 
-        // 构建主推文正文 (文本 + 图片)
+        // 构建主推文正文
         let mainbody = escapeHtml(main.text);
         if (main.images.length > 0) {
             mainbody += '\n' + main.images.map(img => h.image(img).toString()).join('\n');

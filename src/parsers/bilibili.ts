@@ -417,8 +417,6 @@ async function processOpus(ctx: Context, config: PluginConfig, link: Link, logge
     const opusId = link.id;
     const apiUrl = `https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?id=${opusId}`;
 
-    console.log(apiUrl);
-
     try {
         const res = await ctx.http.get(apiUrl, {
             headers: {'User-Agent': config.userAgent, 'Host': 'api.bilibili.com'}
