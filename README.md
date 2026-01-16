@@ -11,6 +11,8 @@
 特别鸣谢以下项目的支持：
 
 - [koishi-plugin-bilibili-videolink-analysis](https://github.com/shangxueink/koishi-shangxue-apps/tree/main/plugins/bilibili-videolink-analysis)
+- [koishi-plugin-bili-parser](https://github.com/summonhim/koishi-plugin-bili-parser)
 - [koishi-plugin-xiaohongshu](https://www.npmjs.com/package/koishi-plugin-xiaohongshu)
 以及解析方式原作者：[@MuJie](https://mu-jie.cc/)
-- [BetterTwitFix](https://github.com/dylanpdx/BetterTwitFix)
+- ~~[BetterTwitFix](https://github.com/dylanpdx/BetterTwitFix)~~
+- [You-Get](https://you-get.org/)

@@ -1,10 +1,10 @@
 // src/parsers/twitter.ts
 
 import {Context, h, Session} from 'koishi';
-import {PluginConfig, ParsedInfo, Link, FileInfo} from '../types';
+import {FileInfo, Link, ParsedInfo, PluginConfig} from '../types';
 import {escapeHtml, getEffectiveSettings, numeral} from '../utils';
 
-export const name="twitter";
+export const name = "twitter";
 
 const linkRules = [
     {
@@ -27,26 +27,19 @@ export function match(content: string): Link[] {
     for (const rule of linkRules) {
         let match;
         while ((match = rule.pattern.exec(content)) !== null) {
-            const username = match[1] || 'unknown';
-            const tweetId = match[2] || match[1];
-            let cleanUrl = match[0];
+            const id = match[2] || match[1]; // short link 只有 group 1
+            const url = rule.type === 'short'
+                ? `https://t.co/${id}`
+                : `https://x.com/${match[1]}/status/${id}`;
 
-            // 处理短链接
-            if (rule.type === 'short') {
-                cleanUrl = `https://t.co/${tweetId}`;
-                // 标准化域名
-            } else {
-                cleanUrl = `https://x.com/${username}/status/${tweetId}`;
-            }
-
-            if (seen.has(cleanUrl)) continue;
-            seen.add(cleanUrl);
+            if (seen.has(url)) continue;
+            seen.add(url);
 
             results.push({
                 platform: name,
                 type: rule.type,
-                id: tweetId,
-                url: cleanUrl,
+                id: id,
+                url: url,
             });
         }
     }
@@ -55,134 +48,182 @@ export function match(content: string): Link[] {
 }
 
 /**
- * 处理单条 Twitter 链接
+ * 计算 Syndication API 所需的 Token
+ * 算法来源: react-tweet / you-get (reverse engineered)
  */
+function getToken(id: string): string {
+    return ((Number(id) / 1e15) * Math.PI)
+        .toString(36)
+        .replace(/(0+|\.)/g, '');
+}
+
+/**
+ * 移除文本末尾的 t.co 链接（通常是媒体链接或引用推文链接）
+ */
+function cleanTwitterLink(text: string): string {
+    return text.replace(/\s*https:\/\/t\.co\/\w+\s*$/, '');
+}
+
+/**
+ * 从推文数据对象中提取内容（文本、图片、视频、封面）
+ * 适用于主推文和 quoted_tweet
+ */
+function extractTweetContent(data: any, config: PluginConfig) {
+    const images: string[] = [];
+    const files: FileInfo[] = [];
+    let cover = '';
+
+    // 1. 图片 (Photos)
+    if (data.photos && Array.isArray(data.photos)) {
+        data.photos.forEach((p: any) => {
+            images.push(p.url);
+            if (!cover) cover = p.url;
+        });
+    }
+
+    // 2. 视频 (Video)
+    // Syndication API 将视频放在 video.variants 中
+    // 或者是 mediaDetails (旧版)
+    const videoObj = data.video || data.mediaDetails?.[0];
+
+    if (videoObj && videoObj.variants) {
+        // 筛选 mp4 格式
+        const variants = videoObj.variants.filter((v: any) => v.content_type === 'video/mp4');
+        let bestVariant = null;
+
+        if (variants.length > 0) {
+            if (config.Video_ClarityPriority === '2') {
+                // 高清晰度优先: 按 bitrate 降序 (大 -> 小)，取第一个
+                bestVariant = variants.sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+            } else {
+                // 低清晰度优先: 按 bitrate 升序 (小 -> 大)，取第一个
+                bestVariant = variants.sort((a: any, b: any) => (a.bitrate || 0) - (b.bitrate || 0))[0];
+            }
+        }
+
+        if (bestVariant) {
+            files.push({type: 'video', url: bestVariant.src || bestVariant.url});
+            if (!cover) cover = videoObj.poster;
+        }
+    }
+
+    // 处理文本：如果提取到了媒体资源，通常文末的链接就是该资源的 t.co 链接，需要移除
+    let text = data.text || '';
+    if (images.length > 0 || files.length > 0) {
+        text = cleanTwitterLink(text);
+    }
+
+    return {
+        text,
+        screenName: data.user?.screen_name || 'unknown',
+        images,
+        files,
+        cover
+    };
+}
+
 export async function process(
     ctx: Context,
     config: PluginConfig,
     link: Link,
     session: Session
 ): Promise<ParsedInfo | null> {
-  const logger = ctx.logger(`share-links-analysis:${name}`);
+    const logger = ctx.logger(`share-links-analysis:${name}`);
 
-    let apiUrl
+    // 处理短链接：通过 HEAD 请求获取真实 ID
+    let tweetId = link.id;
     if (link.type === 'short') {
-        // 短链接需先解析，但 vxtwitter 支持直接转换
-        apiUrl = `https://api.vxtwitter.com/tweet?id=${link.id}`;
+        try {
+            const res = await ctx.http('HEAD', link.url, {redirect: 'follow'});
+            const match = /status\/(\d+)/.exec(res.url);
+            if (match) tweetId = match[1];
+            else throw new Error('无法还原短链接');
+        } catch (e) {
+            logger.warn(`短链接解析失败: ${e}`);
+            return null;
+        }
     }
-    // 标准推文链接
-    apiUrl = link.url.replace("x.com", "api.vxtwitter.com");
 
-    if (!apiUrl) {
-        logger.warn(`无效的 Twitter 链接: ${link.url}`);
-        await session.send('无法解析此 Twitter 链接，URL 格式不正确');
-        return null;
-    }
+    // 构造 Syndication API URL
+    const token = getToken(tweetId);
+    const apiUrl = `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}&lang=en&token=${token}`;
 
     try {
-        logger.debug(`🔍 解析推文: ${apiUrl}`);
-        const tweetData = await ctx.http.get(apiUrl, {
+        logger.debug(`请求 API: ${apiUrl}`);
+        const data = await ctx.http.get(apiUrl, {
             headers: {
-                'User-Agent': config.userAgent,
-                'Accept': 'application/json'
+                'User-Agent': config.userAgent, // 必须设置 UA
+                'Accept': '*/*'
             }
         });
 
-        // 处理 API 错误
-        if (tweetData?.error) {
-            logger.error(`API 错误: ${tweetData.error}`);
-            await session.send(`Twitter API 错误: ${tweetData.error}`);
+        if (!data || !data.text) {
+            throw new Error('API 返回数据无效或推文不存在');
+        }
+
+        // 敏感内容检查
+        const settings = await getEffectiveSettings(ctx, session.guildId, config);
+        if (data.possibly_sensitive && !settings.nsfw) {
+            if (config.showError) await session.send('内容包含敏感信息，已停止解析');
             return null;
         }
 
-        const enable_nsfw = await getEffectiveSettings(ctx, session.guildId, config);
-        if (tweetData.possibly_sensitive && !enable_nsfw) {
-            if (config.showError) await session.send(`潜在的不合规内容，根据策略已停止发送`);
-            return null;
+        // 数据提取
+        const user = data.user;
+        const authorName = user?.name || 'Unknown';
+        const screenName = user?.screen_name || 'unknown';
+        const statsString = `点赞: ${numeral(data.favorite_count, config)} | 评论: ${numeral(data.conversation_count, config)}`;
+
+        // 解析主推文
+        const main = extractTweetContent(data, config);
+
+        // 构建主推文正文 (文本 + 图片)
+        let mainbody = escapeHtml(main.text);
+        if (main.images.length > 0) {
+            mainbody += '\n' + main.images.map(img => h.image(img).toString()).join('\n');
         }
 
-        // 解析媒体
-        let media
-        if (tweetData?.hasMedia) {
-            media = parseMedia(tweetData);
-        }
+        const files: FileInfo[] = [...main.files];
+        const coverUrl = main.cover;
 
-        const likes = numeral(parseInt(tweetData.likes), config);
-        const replies = numeral(parseInt(tweetData.replies), config);
-        const retweets = numeral(parseInt(tweetData.retweets), config);
+        // 解析引用推文 (Quoted Tweet)
+        if (data.quoted_tweet) {
+            // 如果存在引用推文，主推文文末通常会有一个指向该引用的链接，需要移除
+            mainbody = cleanTwitterLink(mainbody);
 
-        const statsString = `点赞: ${likes} | 评论: ${replies} | 转发: ${retweets}`;
+            const quoteData = data.quoted_tweet;
+            const quote = extractTweetContent(quoteData, config);
 
-        let tweet_text
-        if (tweetData.replyingTo) {
-            tweet_text = "回复：" + tweetData.text;
-        } else {
-            tweet_text = tweetData.text
-        }
+            // 追加引用推文内容
+            mainbody += `\n----------\n[引用 @${quote.screenName}]: ${escapeHtml(quote.text)}`;
 
-        const image = media?.images ? media?.images.map(img => h.image(img).toString()).join('\n') : ''
-        const mainbody = escapeHtml(tweet_text) + image
+            // 追加引用推文图片
+            if (quote.images.length > 0) {
+                mainbody += '\n' + quote.images.map(img => h.image(img).toString()).join('\n');
+            }
 
-        const videos = media?.videos
-        let files: FileInfo[] = [];
-        if (videos){
-          for (const video of videos) {
-            files.push({ type: "video", url: video.url });
-          }
+            // 追加引用推文视频到文件列表
+            files.push(...quote.files);
         }
 
         return {
             platform: name,
-            title: `@${tweetData.user_screen_name} 的推文`,
-            authorName: tweetData.user_name || tweetData.user_screen_name,
-            mainbody: mainbody,
-            sourceUrl: link.url,
+            title: `@${screenName} 的推文`,
+            authorName,
+            mainbody,
+            sourceUrl: `https://x.com/${screenName}/status/${tweetId}`,
             stats: statsString,
-            files: files,
-            coverUrl: media?.videos[0]?.preview_url,
+            files,
+            coverUrl
         };
 
     } catch (error: any) {
-        logger.error(`解析失败: ${error.message || error}`);
-
-        // 专项错误处理
-        if (error.message?.includes('429')) {
-            await session.send('Twitter API 速率限制，请稍后再试');
-        } else if (error.message?.includes('404')) {
-            await session.send('推文不存在或已删除');
-        } else if (error.message?.includes('ECONNRESET') || error.message?.includes('ETIMEDOUT')) {
-            await session.send('连接 Twitter API 超时，请重试');
-        } else {
-            await session.send(`解析失败: ${error.message}`);
+        logger.error(`Twitter 解析失败: ${error.message}`);
+        if (error.response?.status === 404) {
+            await session.send('推文不存在或已被删除');
+        } else if (error.response?.status === 429) {
+            await session.send('API 请求过频，请稍后');
         }
-
         return null;
     }
-}
-
-// ======================
-// 内部工具函数
-// ======================
-
-/**
- * 解析媒体数据
- */
-function parseMedia(tweetData: any) {
-    const images: string[] = [];
-    const videos: { url: string; preview_url?: string; duration?: number }[] = [];
-
-    for (const media of tweetData.media_extended) {
-        switch (media.type) {
-            case 'image':
-                images.push(media.url);
-                continue;
-            case 'video':
-                videos.push({
-                    url: media.url,
-                    preview_url: media.thumbnail_url,
-                    duration: media.duration_millis ? media.duration_millis / 1000 : undefined
-                });
-        }
-    }
-    return {images, videos};
 }
