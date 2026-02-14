@@ -71,13 +71,11 @@ function cleanTwitterLink(text: string): string {
 function extractTweetContent(data: any, config: PluginConfig) {
     const images: string[] = [];
     const files: FileInfo[] = [];
-    let cover = '';
 
     // 1. 图片 (Photos)
     if (data.photos && Array.isArray(data.photos)) {
         data.photos.forEach((p: any) => {
             images.push(p.url);
-            if (!cover) cover = p.url;
         });
     }
 
@@ -133,7 +131,6 @@ function extractTweetContent(data: any, config: PluginConfig) {
             if (videoUrl) {
                 files.push({type: 'video', url: videoUrl});
                 // 如果还没有封面（例如没有图片），使用视频封面
-                if (!cover && videoPoster) cover = videoPoster;
             }
         }
     }
@@ -149,7 +146,7 @@ function extractTweetContent(data: any, config: PluginConfig) {
         screenName: data.user?.screen_name || 'unknown',
         images,
         files,
-        cover
+        cover: videoPoster
     };
 }
 
