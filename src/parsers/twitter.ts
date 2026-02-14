@@ -66,7 +66,7 @@ function cleanTwitterLink(text: string): string {
 
 /**
  * 从推文数据对象中提取内容（文本、图片、视频、封面）
- * 适用于主推文和 quoted_tweet
+ * 适用于 Syndication API 数据结构
  */
 function extractTweetContent(data: any, config: PluginConfig) {
     const images: string[] = [];
@@ -150,6 +150,115 @@ function extractTweetContent(data: any, config: PluginConfig) {
     };
 }
 
+/**
+ * 从 VxTwitter API 数据对象中提取内容
+ * 适用于 api.vxtwitter.com 数据结构
+ */
+function extractVxContent(data: any) {
+    const images: string[] = [];
+    const files: FileInfo[] = [];
+    let videoPoster = '';
+
+    if (data.media_extended && Array.isArray(data.media_extended)) {
+        for (const media of data.media_extended) {
+            if (media.type === 'image') {
+                images.push(media.url);
+            } else if (media.type === 'video' || media.type === 'gif') {
+                files.push({type: 'video', url: media.url});
+                if (!videoPoster && media.thumbnail_url) {
+                    videoPoster = media.thumbnail_url;
+                }
+            }
+        }
+    }
+
+    let text = data.text || '';
+    // VxTwitter 有时会自动清理链接，但也可能保留，尝试清理
+    if (images.length > 0 || files.length > 0) {
+        text = cleanTwitterLink(text);
+    }
+
+    return {
+        text,
+        screenName: data.user_screen_name || 'unknown',
+        authorName: data.user_name || 'Unknown',
+        images,
+        files,
+        cover: videoPoster
+    };
+}
+
+/**
+ * 使用 VxTwitter API 进行回退解析
+ */
+async function handleVxFallback(
+    ctx: Context,
+    config: PluginConfig,
+    tweetId: string,
+    session: Session
+): Promise<ParsedInfo | null> {
+    const logger = ctx.logger(`share-links-analysis:${name}:fallback`);
+    // 使用 Twitter 作为占位符，VxAPI 会根据 ID 自动解析
+    const apiUrl = `https://api.vxtwitter.com/Twitter/status/${tweetId}`;
+
+    try {
+        logger.debug(`请求 VxAPI: ${apiUrl}`);
+        const data = await ctx.http.get(apiUrl, {
+            headers: {
+                'User-Agent': config.userAgent
+            }
+        });
+
+        if (!data) throw new Error('VxAPI 返回无效');
+
+        // 敏感内容检查 (VxTwitter 返回 possibly_sensitive)
+        const settings = await getEffectiveSettings(ctx, session.guildId, config);
+        if (data.possibly_sensitive && !settings.nsfw) {
+            if (config.showError) await session.send('内容包含敏感信息，已停止解析 (Fallback)');
+            return null;
+        }
+
+        const main = extractVxContent(data);
+        const statsString = `点赞: ${numeral(data.likes, config)} | 评论: ${numeral(data.replies, config)} | 转发: ${numeral(data.retweets, config)}`;
+
+        // 构建主推文正文
+        let mainbody = escapeHtml(main.text);
+        if (main.images.length > 0) {
+            mainbody += '\n' + main.images.map(img => h.image(img).toString()).join('\n');
+        }
+
+        const files: FileInfo[] = [...main.files];
+        const coverUrl = main.cover;
+
+        // 解析引用推文 (Quoted Tweet)
+        if (data.quoted_tweet) {
+            mainbody = cleanTwitterLink(mainbody);
+            const quote = extractVxContent(data.quoted_tweet);
+            mainbody += `\n----------\n[引用 @${quote.screenName}]: ${escapeHtml(quote.text)}`;
+            if (quote.images.length > 0) {
+                mainbody += '\n' + quote.images.map(img => h.image(img).toString()).join('\n');
+            }
+            files.push(...quote.files);
+        }
+
+        return {
+            platform: name,
+            title: `@${main.screenName} 的推文`,
+            authorName: main.authorName,
+            mainbody,
+            sourceUrl: `https://x.com/${main.screenName}/status/${tweetId}`,
+            stats: statsString,
+            files,
+            coverUrl
+        };
+
+    } catch (e: any) {
+        logger.error(`VxTwitter fallback failed: ${e.message}`);
+        // 这里不再抛出错误给上层，而是返回 null 或让 process 最后的错误处理接管
+        throw e;
+    }
+}
+
 export async function process(
     ctx: Context,
     config: PluginConfig,
@@ -172,11 +281,11 @@ export async function process(
         }
     }
 
-    // 构造 Syndication API URL
-    const token = getToken(tweetId);
-    const apiUrl = `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}&lang=en&token=${token}`;
-
+    // 尝试首选: Syndication API
     try {
+        const token = getToken(tweetId);
+        const apiUrl = `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}&lang=en&token=${token}`;
+
         logger.debug(`请求 API: ${apiUrl}`);
         const data = await ctx.http.get(apiUrl, {
             headers: {
@@ -196,7 +305,7 @@ export async function process(
             return null;
         }
 
-        // 数据提取
+        // 数据提取 (Syndication Logic)
         const user = data.user;
         const authorName = user?.name || 'Unknown';
         const screenName = user?.screen_name || 'unknown';
@@ -206,7 +315,7 @@ export async function process(
         const main = extractTweetContent(data, config);
 
         // 构建主推文正文
-        let mainbody = escapeHtml(main.text);
+        let mainbody = main.text;
         if (main.images.length > 0) {
             mainbody += '\n' + main.images.map(img => h.image(img).toString()).join('\n');
         }
@@ -223,7 +332,7 @@ export async function process(
             const quote = extractTweetContent(quoteData, config);
 
             // 追加引用推文内容
-            mainbody += `\n----------\n[引用 @${quote.screenName}]: ${escapeHtml(quote.text)}`;
+            mainbody += `\n----------\n[引用 @${quote.screenName}]: ${quote.text}`;
 
             // 追加引用推文图片
             if (quote.images.length > 0) {
@@ -246,6 +355,20 @@ export async function process(
         };
 
     } catch (error: any) {
+        // 如果是 429 (Rate Limit) 或其他非 404 错误，尝试 Fallback
+        // 404 通常意味着推文真的没了，但有时候 API 抽风也会 404
+        const isNotFound = error.response?.status === 404;
+
+        if (!isNotFound) {
+            logger.warn(`Syndication API 失败 (${error.message})，尝试 VxTwitter Fallback...`);
+            try {
+                return await handleVxFallback(ctx, config, tweetId, session);
+            } catch (fallbackError: any) {
+                logger.error(`Fallback 失败: ${fallbackError.message}`);
+            }
+        }
+
+        // 最终错误处理
         logger.error(`Twitter 解析失败: ${error.message}`);
         if (error.response?.status === 404) {
             await session.send('推文不存在或已被删除');

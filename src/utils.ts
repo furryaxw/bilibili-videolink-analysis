@@ -122,7 +122,7 @@ export async function syncCookiesFromCloud(ctx: Context, config: PluginConfig): 
                 const uniqueMap = new Map();
                 matchedCookies.forEach(c => {
                     const [k, v] = c.split('=');
-                    if(k && v) uniqueMap.set(k.trim(), v.trim());
+                    if (k && v) uniqueMap.set(k.trim(), v.trim());
                 });
                 const newCookieStr = Array.from(uniqueMap.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
 
@@ -768,14 +768,18 @@ export async function sendResult_forward(
     }
 
     // --- mainbody 图片 ---
-    if (result.mainbody) {
-        const imgUrls = [...result.mainbody.matchAll(/<img\s[^>]*src\s*=\s*["']?([^"'>\s]+)["']?/gi)].map(m => m[1]);
+    if (mediaMainbody) {
+        const imgUrls = [...mediaMainbody.matchAll(/<img\s[^>]*src\s*=\s*["']?([^"'>\s]+)["']?/gi)].map(m => m[1]);
         const urlMap: Record<string, string> = {};
+
         await Promise.all(imgUrls.map(async (url) => {
                 if (config.usingLocal) {
                     const t = Date.now();
                     try {
-                        urlMap[url] = await downloadAndMapUrl(ctx, url, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
+                        // 去重下载
+                        if (!urlMap[url]) {
+                            urlMap[url] = await downloadAndMapUrl(ctx, url, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
+                        }
                     } catch (e) {
                         logger.warn(`正文图片下载失败: ${url}`, e);
                     }
@@ -784,9 +788,8 @@ export async function sendResult_forward(
                     urlMap[url] = url
                 }
             }
-        ))
-        ;
-        mediaMainbody = result.mainbody;
+        ));
+
         for (const [remote, local] of Object.entries(urlMap)) {
             const escaped = remote.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             mediaMainbody = mediaMainbody.replace(new RegExp(escaped, 'g'), local);
