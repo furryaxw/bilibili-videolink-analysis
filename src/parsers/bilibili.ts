@@ -2,7 +2,8 @@
 
 import {Context, h, Session} from 'koishi';
 import {BilibiliVideoInfo, FileInfo, Link, ParsedInfo, PluginConfig} from '../types';
-import {escapeHtml, numeral} from '../utils';
+import {escapeHtml, getCookie, numeral} from '../utils';
+import crypto from 'crypto';
 
 export const name = "bilibili";
 
@@ -42,6 +43,88 @@ function avToBv(avid: string | number): string {
     return result.join('');
 }
 
+// --- WBI 签名算法与视频流获取 ---
+const mixinKeyEncTab = [
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42,
+    19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60,
+    51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
+];
+
+function getMixinKey(orig: string) {
+    return mixinKeyEncTab.map(n => orig[n]).join('').slice(0, 32);
+}
+
+function md5(str: string) {
+    return crypto.createHash('md5').update(str).digest('hex');
+}
+
+async function getWbiKeys(ctx: Context, userAgent: string) {
+    try {
+        const res = await ctx.http.get('https://api.bilibili.com/x/web-interface/nav', {
+            headers: {'User-Agent': userAgent, 'Referer': 'https://www.bilibili.com'}
+        });
+        const wbiImg = res.data?.wbi_img;
+        if (!wbiImg) return null;
+        const img_url = wbiImg.img_url;
+        const sub_url = wbiImg.sub_url;
+        return {
+            img_key: img_url.slice(img_url.lastIndexOf('/') + 1, img_url.lastIndexOf('.')),
+            sub_key: sub_url.slice(sub_url.lastIndexOf('/') + 1, sub_url.lastIndexOf('.'))
+        };
+    } catch (e) {
+        return null;
+    }
+}
+
+function encWbi(params: Record<string, string | number>, img_key: string, sub_key: string) {
+    const mixin_key = getMixinKey(img_key + sub_key);
+    const curr_time = Math.round(Date.now() / 1000);
+    const chr_filter = /[!'()*]/g;
+
+    const newParams: Record<string, string | number> = {...params, wts: curr_time};
+    const query = Object.keys(newParams)
+        .sort()
+        .map(key => {
+            const value = (newParams[key] || '').toString().replace(chr_filter, '');
+            return `${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
+        })
+        .join('&');
+
+    const wbi_sign = md5(query + mixin_key);
+    return `${query}&w_rid=${wbi_sign}`;
+}
+
+/**
+ * 独立获取 Bilibili 视频流
+ */
+async function getVideoStream(ctx: Context, aid: number, bvid: string, cid: number, qn: number, config: PluginConfig) {
+    const keys = await getWbiKeys(ctx, config.userAgent);
+    if (!keys) throw new Error("无法获取 WBI Keys");
+
+    const params = {
+        avid: aid,
+        bvid: bvid,
+        cid: cid,
+        qn: qn,
+        high_quality: 1,
+        fnver: 0,
+        fnval: 1,
+        fourk: 1,
+        platform: 'html5'
+    };
+
+    const query = encWbi(params, keys.img_key, keys.sub_key);
+    const url = `https://api.bilibili.com/x/player/wbi/playurl?${query}`;
+
+    // 必须带有 Referer 和 User-Agent，否则很容易触发 412 风控拦截
+    return await ctx.http.get(url, {
+        headers: {
+            'User-Agent': config.userAgent,
+            'Referer': 'https://www.bilibili.com'
+        }
+    });
+}
+
 // --- 链接匹配规则 ---
 const linkRules = [
     // Video: 匹配 BV/av 号
@@ -54,25 +137,20 @@ const linkRules = [
         pattern: /(?:https?:\/\/)?live\.bilibili\.com(?:\/h5)?\/(\d+)/gi,
         type: "live" as const,
     },
-    // 动态和专栏解析有非常严重的问题，无法使用
-    // // Article: 专栏 (cv号)
-    // {
-    //     pattern: /(?:https?:\/\/)?(?:www|m)\.bilibili\.com\/read\/cv(\d+)/gi,
-    //     type: "article" as const,
-    // },
-    // // Opus / Dynamic / t.bilibili: 动态与新版专栏
-    // // 覆盖: m.bilibili.com/dynamic/, www.bilibili.com/opus/, t.bilibili.com/
-    // {
-    //     pattern: /(?:https?:\/\/)?(?:(?:www|m)\.bilibili\.com\/(?:opus|dynamic)\/|t\.bilibili\.com\/)(\d+)/gi,
-    //     type: "opus" as const,
-    // },
+    // Article: 专栏 (cv号)
+    {
+        pattern: /(?:https?:\/\/)?(?:www|m)\.bilibili\.com\/read\/cv(\d+)/gi,
+        type: "article" as const,
+    },
+    // Opus / Dynamic / t.bilibili: 动态与新版专栏
+    // 覆盖: m.bilibili.com/dynamic/, www.bilibili.com/opus/, t.bilibili.com/
+    {
+        pattern: /(?:https?:\/\/)?(?:(?:www|m)\.bilibili\.com\/(?:opus|dynamic)\/|t\.bilibili\.com\/)(\d+)/gi,
+        type: "opus" as const,
+    },
     // Space: 个人空间 (支持 space.bilibili.com 和 bilibili.com/space)
     {
-        pattern: /(?:https?:\/\/)?space\.bilibili\.com\/(\d+)/gi,
-        type: "space" as const,
-    },
-    {
-        pattern: /(?:https?:\/\/)?(?:www|m)\.bilibili\.com\/space\/(\d+)/gi,
+        pattern: /(?:https?:\/\/)?(?:space\.bilibili\.com|(?:www|m)\.bilibili\.com\/space)\/(\d+)/gi,
         type: "space" as const,
     },
     // Audio: 音乐 (au)
@@ -307,20 +385,19 @@ async function processVideo(ctx: Context, config: PluginConfig, link: Link, logg
         // 获取视频流直链
         let videoUrl: string | null = null;
         try {
-            // 优先使用插件提供的 BiliBiliVideo 服务 (需确保依赖存在)
-            if (ctx.BiliBiliVideo) {
-                const qn = config.Video_ClarityPriority === '1' ? 32 : 80;
-                const videoStream = await ctx.BiliBiliVideo.getBilibiliVideoStream(data.aid, data.bvid, data.pages[0].cid, qn, 'html5', 1);
-                if (videoStream?.data?.durl?.[0]?.url) {
-                    videoUrl = videoStream.data.durl[0].url;
-                }
+            const qn = config.Video_ClarityPriority === '1' ? 32 : 80;
+            // 直接调用本地集成的无登录视频流请求
+            const videoStream = await getVideoStream(ctx, data.aid, data.bvid, data.pages[0].cid, qn, config);
+
+            if (videoStream?.data?.durl?.[0]?.url) {
+                videoUrl = videoStream.data.durl[0].url;
             }
         } catch (e: any) {
             logger.error(`获取视频流失败: ${e.message}`);
         }
 
         const statsString = `播放: ${numeral(data.stat.view, config)} | 弹幕: ${numeral(data.stat.danmaku, config)}\n` +
-                            `点赞: ${numeral(data.stat.like, config)} | 硬币: ${numeral(data.stat.coin, config)} | 收藏: ${numeral(data.stat.favorite, config)}`;
+            `点赞: ${numeral(data.stat.like, config)} | 硬币: ${numeral(data.stat.coin, config)} | 收藏: ${numeral(data.stat.favorite, config)}`;
 
         const files: FileInfo[] = videoUrl ? [{type: "video", url: videoUrl}] : [];
 
@@ -352,7 +429,7 @@ async function processLive(ctx: Context, config: PluginConfig, link: Link, logge
         if (res.code !== 0 || !res.data) throw new Error(res.msg || 'API Error');
         const data = res.data;
 
-        const statusMap: Record<number, string> = { 0: '未开播', 1: '直播中', 2: '轮播中' };
+        const statusMap: Record<number, string> = {0: '未开播', 1: '直播中', 2: '轮播中'};
         const statusText = statusMap[data.live_status] || '未知状态';
 
         const statsString = `状态: ${statusText} | 观看: ${numeral(data.online, config)} | 关注: ${numeral(data.attention, config)}`;
@@ -381,8 +458,15 @@ async function processArticle(ctx: Context, config: PluginConfig, link: Link, lo
     const apiUrl = `https://api.bilibili.com/x/article/viewinfo?id=${cvId}`;
 
     try {
+        // 获取 Cookie
+        const cookie = await getCookie(ctx, config, name);
+
         const res = await ctx.http.get(apiUrl, {
-            headers: {'User-Agent': config.userAgent, 'Host': 'api.bilibili.com'}
+            headers: {
+                'User-Agent': config.userAgent,
+                'Referer': `https://www.bilibili.com/read/cv${cvId}`,
+                'Cookie': cookie || ''
+            }
         });
 
         if (res.code !== 0 || !res.data) throw new Error(res.message || 'API Error');
@@ -390,11 +474,12 @@ async function processArticle(ctx: Context, config: PluginConfig, link: Link, lo
 
         const statsString = `阅读: ${numeral(data.stats.view, config)} | 点赞: ${numeral(data.stats.like, config)} | 硬币: ${numeral(data.stats.coin, config)}`;
 
-        // 提取图片（如果 banner_url 存在）
+        // 提取图片
         let mainbody = escapeHtml(data.summary || '');
-        if (data.image_urls && data.image_urls.length > 0) {
+        const coverImage = data.banner_url || data.image_urls?.[0] || data.origin_image_urls?.[0];
+        if (coverImage) {
             // 添加第一张图作为正文配图
-             mainbody += `\n` + h.image(data.image_urls[0]).toString();
+            mainbody += `\n` + h.image(coverImage).toString();
         }
 
         return {
@@ -402,7 +487,7 @@ async function processArticle(ctx: Context, config: PluginConfig, link: Link, lo
             title: data.title,
             authorName: data.author_name,
             mainbody: mainbody,
-            coverUrl: data.banner_url || data.image_urls?.[0],
+            coverUrl: coverImage,
             files: [],
             sourceUrl: `https://www.bilibili.com/read/cv${cvId}`,
             stats: statsString,
@@ -415,50 +500,204 @@ async function processArticle(ctx: Context, config: PluginConfig, link: Link, lo
 
 async function processOpus(ctx: Context, config: PluginConfig, link: Link, logger: any): Promise<ParsedInfo | null> {
     const opusId = link.id;
-    const apiUrl = `https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?id=${opusId}`;
+    // B站新版动态必须传递 timezone_offset，否则部分动态获取为空或报错
+    const apiUrl = `https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?timezone_offset=-480&id=${opusId}`;
 
     try {
+        // 获取 Cookie
+        const cookie = await getCookie(ctx, config, name);
+
         const res = await ctx.http.get(apiUrl, {
-            headers: {'User-Agent': config.userAgent, 'Host': 'api.bilibili.com'}
+            headers: {
+                'User-Agent': config.userAgent,
+                'Referer': `https://t.bilibili.com/${opusId}`,
+                'Cookie': cookie || ''
+            }
         });
 
         if (res.code !== 0 || !res.data?.item) throw new Error(res.message || 'API Error');
         const item = res.data.item;
         const modules = item.modules;
+        if (!modules) throw new Error('动态内容为空');
 
         const author = modules.module_author;
         const dynamic = modules.module_dynamic;
         const stat = modules.module_stat;
 
-        // 检测是否为专栏文章类型的 Opus
-        const isArticle = !!dynamic?.major?.article;
+        // 辅助函数：提取分散的富文本节点
+        const extractRichText = (nodes: any[]) => {
+            if (!nodes || !Array.isArray(nodes)) return '';
+            return nodes.map(n => n.orig_text || n.text || '').join('');
+        };
 
-        let title = `${author?.name} 的动态`;
-        let text = dynamic?.desc?.text || '';
-        let coverUrl = author?.face;
+        // 辅助函数：处理 B 站常用的无协议头链接 (比如 //www.bilibili.com/...)
+        const formatJumpUrl = (url: string) => {
+            if (!url) return '';
+            if (url.startsWith('//')) return `https:${url}`;
+            return url;
+        };
 
-        // 如果是专栏，优先使用专栏的标题和封面
-        if (isArticle) {
-            title = dynamic.major.article.title || title;
-            text = dynamic.major.article.desc || text; // 专栏摘要
-            if (dynamic.major.article.covers && dynamic.major.article.covers.length > 0) {
-                coverUrl = dynamic.major.article.covers[0];
+        let title = `${author?.name || '未知用户'} 的动态`;
+        let coverUrl = '';
+        const images: string[] = [];
+
+        // 1. 尝试从新版 API 提取文本
+        let text = dynamic?.desc?.text
+            || extractRichText(dynamic?.desc?.rich_text_nodes)
+            || '';
+
+        if (dynamic?.major) {
+            const major = dynamic.major;
+
+            if (major.type === 'MAJOR_TYPE_OPUS' && major.opus) {
+                // 图文动态：提取文本，并将配图放进 images
+                text = major.opus.summary?.text
+                    || extractRichText(major.opus.summary?.rich_text_nodes)
+                    || text;
+                major.opus.pics?.forEach((p: any) => {
+                    if (p.url) images.push(p.url);
+                });
+            } else if (major.type === 'MAJOR_TYPE_DRAW' && major.draw) {
+                // 纯图动态：将配图放进 images
+                major.draw.items?.forEach((i: any) => {
+                    if (i.src) images.push(i.src);
+                });
+            } else if (major.type === 'MAJOR_TYPE_ARTICLE' && major.article) {
+                // 专栏：提取标题和摘要，将封面放进 coverUrl
+                title = major.article.title || title;
+                text = major.article.desc || text;
+                if (major.article.covers && major.article.covers.length > 0) {
+                    coverUrl = major.article.covers[0];
+                }
+            } else if (major.type === 'MAJOR_TYPE_ARCHIVE' && major.archive) {
+                // 视频：提取标题和摘要，将封面放进 coverUrl
+                title = major.archive.title || title;
+                text = major.archive.desc || text;
+                if (major.archive.cover) {
+                    coverUrl = major.archive.cover;
+                }
+            } else if (major.type === 'MAJOR_TYPE_COMMON' && major.common) {
+                // 网页分享等：将封面放进 coverUrl
+                title = major.common.title || title;
+                text = major.common.desc || text;
+                if (major.common.cover) {
+                    coverUrl = major.common.cover;
+                }
             }
         }
 
-        // 尝试提取图片
-        const images: string[] = [];
-        if (dynamic?.major?.draw?.items) {
-            dynamic.major.draw.items.forEach((i: any) => {
-                if (i.src) images.push(i.src);
-            });
-        } else if (dynamic?.major?.opus?.pics) {
-            dynamic.major.opus.pics.forEach((p: any) => {
-                if (p.url) images.push(p.url);
-            });
+        // 2. VC 接口兜底：如果新接口彻底没有返回文字，调用老版 VC 接口补偿
+        if (!text || text.trim() === '') {
+            try {
+                const vcApiUrl = `https://api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/get_dynamic_detail?dynamic_id=${opusId}`;
+                const cookie = await getCookie(ctx, config, name);
+                const vcRes = await ctx.http.get(vcApiUrl, {
+                    headers: {'User-Agent': config.userAgent, 'Cookie': cookie || ''}
+                });
+
+                if (vcRes.code === 0 && vcRes.data?.card?.card) {
+                    // 老版接口的 card 字段是一个 JSON 字符串，必须 parse
+                    const cardData = JSON.parse(vcRes.data.card.card);
+                    // 老版本中，文字一般存放在 item.description 或 item.content 里面
+                    text = cardData.item?.description || cardData.item?.content || text;
+                }
+            } catch (vcErr) {
+                logger.warn(`VC 接口补偿获取失败: ${vcErr}`);
+            }
         }
 
-        const mainbody = escapeHtml(text) + (images.length ? '\n' + images.map(url => h.image(url).toString()).join('') : '');
+        // 3. 处理转发嵌套逻辑，并严格控制排版
+        let forwardBlock = ''; // 提前渲染好的转发区域代码
+
+        if (item.type === 'DYNAMIC_TYPE_FORWARD' && item.orig) {
+            const orig = item.orig;
+            const origAuthor = orig.modules?.module_author?.name || '原作者';
+
+            let origDesc = orig.modules?.module_dynamic?.desc?.text
+                || extractRichText(orig.modules?.module_dynamic?.desc?.rich_text_nodes)
+                || '';
+
+            let origTitle = '';
+            let origCover = '';
+            let origImages: string[] = [];
+            let origJumpUrl = '';
+
+            if (orig.modules?.module_dynamic?.major) {
+                const oMajor = orig.modules.module_dynamic.major;
+
+                if (oMajor.type === 'MAJOR_TYPE_OPUS' && oMajor.opus) {
+                    origDesc = oMajor.opus.summary?.text || origDesc;
+                    oMajor.opus.pics?.forEach((p: any) => { if (p.url) origImages.push(p.url); });
+                    origJumpUrl = oMajor.opus.jump_url;
+                } else if (oMajor.type === 'MAJOR_TYPE_DRAW' && oMajor.draw) {
+                    oMajor.draw.items?.forEach((i: any) => { if (i.src) origImages.push(i.src); });
+                    origJumpUrl = oMajor.draw.jump_url;
+                } else if (oMajor.type === 'MAJOR_TYPE_ARTICLE' && oMajor.article) {
+                    origTitle = oMajor.article.title || '';
+                    origDesc = oMajor.article.desc || origDesc;
+                    if (oMajor.article.covers && oMajor.article.covers.length > 0) {
+                        origCover = oMajor.article.covers[ 0 ];
+                    }
+                    origJumpUrl = oMajor.article.jump_url;
+                } else if (oMajor.type === 'MAJOR_TYPE_ARCHIVE' && oMajor.archive) {
+                    origTitle = oMajor.archive.title || '';
+                    origDesc = oMajor.archive.desc || origDesc;
+                    if (oMajor.archive.cover) {
+                        origCover = oMajor.archive.cover;
+                    }
+                    origJumpUrl = oMajor.archive.jump_url || (oMajor.archive.bvid ? `https://www.bilibili.com/video/${oMajor.archive.bvid}` : '');
+                } else if (oMajor.type === 'MAJOR_TYPE_COMMON' && oMajor.common) {
+                    origTitle = oMajor.common.title || '';
+                    origDesc = oMajor.common.desc || origDesc;
+                    if (oMajor.common.cover) {
+                        origCover = oMajor.common.cover;
+                    }
+                    origJumpUrl = oMajor.common.jump_url;
+                }
+            }
+
+            // 按要求的顺序组装 forwardBlock
+            // [转发自]
+            forwardBlock += `\n\n${escapeHtml(`[转发自 @${origAuthor}]:`)}\n`;
+            // [标题]
+            if (origTitle) {
+                forwardBlock += `${escapeHtml(`《${origTitle}》`)}\n`;
+            }
+            // [cover]
+            if (origCover) {
+                forwardBlock += h.image(origCover).toString() + '\n';
+            }
+            // [desc]
+            if (origDesc) {
+                forwardBlock += escapeHtml(origDesc.trim()) + '\n';
+            }
+            // [image]
+            if (origImages.length > 0) {
+                forwardBlock += origImages.map(url => h.image(url).toString()).join('') + '\n';
+            }
+            // [链接]
+            if (origJumpUrl) {
+                forwardBlock += escapeHtml(`${formatJumpUrl(origJumpUrl)}`);
+            }
+        }
+
+        // 4. 清理首尾空格
+        if (text) {
+            text = text.trim();
+        }
+
+        // 5. 组合最终内容主体
+        let mainbody = text ? escapeHtml(text) : '';
+
+        // 5.1 追加最外层的自身配图
+        if (images.length > 0) {
+            mainbody += (mainbody ? '\n' : '') + images.map(url => h.image(url).toString()).join('');
+        }
+
+        // 5.2 将组装好的转发块（已包含转义和图文混排）追加到末尾
+        if (forwardBlock) {
+            mainbody += forwardBlock;
+        }
 
         const statsString = `转发: ${numeral(stat?.forward?.count || 0, config)} | 评论: ${numeral(stat?.comment?.count || 0, config)} | 点赞: ${numeral(stat?.like?.count || 0, config)}`;
 
@@ -480,37 +719,39 @@ async function processOpus(ctx: Context, config: PluginConfig, link: Link, logge
 
 async function processSpace(ctx: Context, config: PluginConfig, link: Link, logger: any): Promise<ParsedInfo | null> {
     const mid = link.id;
-    // 使用动态 Feed API 来获取空间信息
-    const apiUrl = `https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space?host_mid=${mid}`;
+    const apiUrl = `https://api.bilibili.com/x/web-interface/card?mid=${mid}`;
 
     try {
+        // 获取 Cookie
+        const cookie = await getCookie(ctx, config, name);
+
         const res = await ctx.http.get(apiUrl, {
-            headers: {'User-Agent': config.userAgent, 'Host': 'api.bilibili.com'}
+            headers: {
+                'User-Agent': config.userAgent,
+                'Referer': `https://space.bilibili.com/${mid}`,
+                'Cookie': cookie || ''
+            }
         });
-        if (res.code !== 0) throw new Error(res.message);
 
-        // 尝试从第一条动态中获取作者信息
-        const firstItem = res.data?.items?.[0];
-        if (!firstItem) {
-            throw new Error("空间为空或不可见");
-        }
+        if (res.code !== 0 || !res.data) throw new Error(res.message || 'API Error');
 
-        const author = firstItem.modules.module_author;
-        const title = `${author.name} 的个人空间`;
-        const coverUrl = author.face;
+        const card = res.data.card;
+        const title = `${card.name} 的个人空间`;
+        const coverUrl = card.face;
 
-        // 构造简单的空间描述
-        const mainbody = `UID: ${author.mid}\n最近发布时间: ${author.pub_time}`;
+        // 构造空间描述
+        const mainbody = `UID: ${card.mid}\n签名: ${card.sign || '无'}`;
+        const statsString = `关注: ${numeral(card.attention, config)} | 粉丝: ${numeral(card.fans, config)}`;
 
         return {
             platform: name,
             title: title,
-            authorName: author.name,
-            mainbody: mainbody,
+            authorName: card.name,
+            mainbody: escapeHtml(mainbody),
             coverUrl: coverUrl,
             files: [],
             sourceUrl: `https://space.bilibili.com/${mid}`,
-            stats: '',
+            stats: statsString,
         };
     } catch (e: any) {
         logger.error(`空间解析异常: ${e.message}`);

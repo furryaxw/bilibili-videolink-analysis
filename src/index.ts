@@ -8,7 +8,7 @@ import * as fs from 'node:fs';
 
 export const name = 'share-links-analysis';
 export const inject = {
-    required: ['BiliBiliVideo', 'database', 'puppeteer'],
+    required: ['database', 'puppeteer'],
     optional: [],
 };
 

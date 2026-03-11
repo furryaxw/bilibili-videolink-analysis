@@ -58,10 +58,70 @@ function getToken(id: string): string {
 }
 
 /**
- * 移除文本末尾的 t.co 链接（通常是媒体链接或引用推文链接）
+ * 展开文本中的 t.co 短链
+ * 如果是推文附带的图片/视频链接，则移除；否则替换为展开的真实 URL
  */
-function cleanTwitterLink(text: string): string {
-    return text.replace(/\s*https:\/\/t\.co\/\w+\s*$/, '');
+async function processTweetText(ctx: Context, text: string, tweetId: string, data: any, config: PluginConfig): Promise<string> {
+    let processedText = text || '';
+
+    // 1. 如果 API 数据中包含 entities (如 Syndication API)，优先利用官方映射进行精准替换
+    if (data?.entities) {
+        // 移除媒体链接 (图片/视频等附件)
+        if (Array.isArray(data.entities.media)) {
+            data.entities.media.forEach((m: any) => {
+                if (m.url) processedText = processedText.split(m.url).join('');
+            });
+        }
+        // 展开普通外部/引用链接
+        if (Array.isArray(data.entities.urls)) {
+            data.entities.urls.forEach((u: any) => {
+                if (u.url && u.expanded_url) {
+                    processedText = processedText.split(u.url).join(u.expanded_url);
+                }
+            });
+        }
+    }
+
+    // 2. 扫描并处理残留的 t.co 短链 (适用于 VxTwitter API 或上一步没清理干净的情况)
+    const tcoRegex = /https:\/\/t\.co\/\w+/g;
+    const matches = processedText.match(tcoRegex);
+
+    if (matches) {
+        // 去重后进行请求
+        const seenUrls = Array.from(new Set(matches));
+        for (const tcoUrl of seenUrls) {
+            let expandedUrl = tcoUrl;
+
+            try {
+                // 发送 HEAD 请求探测真实 URL，并应用代理设置
+                const reqOptions: any = {redirect: 'follow'};
+                if (config.proxy) reqOptions.proxyAgent = config.proxy;
+
+                const res = await ctx.http('HEAD', tcoUrl, reqOptions);
+                expandedUrl = res?.url || (res as any)?.request?.res?.responseUrl || tcoUrl;
+            } catch (e: any) {
+                // 即使报 403 等错误，只要重定向成功暴露了真实 url 就继续使用
+                if (e.response && e.response.url) {
+                    expandedUrl = e.response.url;
+                } else {
+                    ctx.logger(`share-links-analysis:${name}`).debug(`t.co 链接探测失败: ${tcoUrl} - ${e.message}`);
+                }
+            }
+
+            if (expandedUrl && expandedUrl !== tcoUrl) {
+                const isOwnMedia = new RegExp(`/status/${tweetId}/(photo|video)/`, 'i').test(expandedUrl) ||
+                    expandedUrl.endsWith(`/status/${tweetId}`);
+
+                if (isOwnMedia) {
+                    processedText = processedText.split(tcoUrl).join('');
+                } else {
+                    processedText = processedText.split(tcoUrl).join(expandedUrl);
+                }
+            }
+        }
+    }
+
+    return processedText.trim();
 }
 
 /**
@@ -135,14 +195,8 @@ function extractTweetContent(data: any, config: PluginConfig) {
         }
     }
 
-    // 处理文本：如果提取到了媒体资源，通常文末的链接就是该资源的 t.co 链接，需要移除
-    let text = data.text || '';
-    if (images.length > 0 || files.length > 0) {
-        text = cleanTwitterLink(text);
-    }
-
     return {
-        text,
+        text: data.text || '',
         screenName: data.user?.screen_name || 'unknown',
         images,
         files,
@@ -172,14 +226,8 @@ function extractVxContent(data: any) {
         }
     }
 
-    let text = data.text || '';
-    // VxTwitter 有时会自动清理链接，但也可能保留，尝试清理
-    if (images.length > 0 || files.length > 0) {
-        text = cleanTwitterLink(text);
-    }
-
     return {
-        text,
+        text: data.text || '',
         screenName: data.user_screen_name || 'unknown',
         authorName: data.user_name || 'Unknown',
         images,
@@ -189,40 +237,51 @@ function extractVxContent(data: any) {
 }
 
 /**
- * 使用 VxTwitter API 进行回退解析
+ * 使用 Syndication API 进行回退解析
  */
-async function handleVxFallback(
+async function handleSyndicationFallback(
     ctx: Context,
     config: PluginConfig,
     tweetId: string,
     session: Session
 ): Promise<ParsedInfo | null> {
     const logger = ctx.logger(`share-links-analysis:${name}:fallback`);
-    // 使用 Twitter 作为占位符，VxAPI 会根据 ID 自动解析
-    const apiUrl = `https://api.vxtwitter.com/Twitter/status/${tweetId}`;
+    const token = getToken(tweetId);
+    const apiUrl = `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}&lang=en&token=${token}`;
 
     try {
-        logger.debug(`请求 VxAPI: ${apiUrl}`);
-        const data = await ctx.http.get(apiUrl, {
+        logger.debug(`请求 Syndication API: ${apiUrl}`);
+
+        const reqOptions: any = {
             headers: {
-                'User-Agent': config.userAgent
+                'User-Agent': config.userAgent,
+                'Accept': '*/*'
             }
-        });
+        };
+        if (config.proxy) reqOptions.proxyAgent = config.proxy;
 
-        if (!data) throw new Error('VxAPI 返回无效');
+        const data = await ctx.http.get(apiUrl, reqOptions);
 
-        // 敏感内容检查 (VxTwitter 返回 possibly_sensitive)
+        if (!data || !data.text) {
+            throw new Error('Syndication API 返回数据无效或推文不存在');
+        }
+
+        // 敏感内容检查
         const settings = await getEffectiveSettings(ctx, session.guildId, config);
         if (data.possibly_sensitive && !settings.nsfw) {
             if (config.showError) await session.send('内容包含敏感信息，已停止解析 (Fallback)');
             return null;
         }
 
-        const main = extractVxContent(data);
-        const statsString = `点赞: ${numeral(data.likes, config)} | 评论: ${numeral(data.replies, config)} | 转发: ${numeral(data.retweets, config)}`;
+        const user = data.user;
+        const authorName = user?.name || 'Unknown';
+        const screenName = user?.screen_name || 'unknown';
+        const statsString = `点赞: ${numeral(data.favorite_count, config)} | 评论: ${numeral(data.conversation_count, config)}`;
 
-        // 构建主推文正文
-        let mainbody = escapeHtml(main.text);
+        const main = extractTweetContent(data, config);
+
+        let mainbody = await processTweetText(ctx, main.text, tweetId, data, config);
+
         if (main.images.length > 0) {
             mainbody += '\n' + main.images.map(img => h.image(img).toString()).join('\n');
         }
@@ -230,11 +289,108 @@ async function handleVxFallback(
         const files: FileInfo[] = [...main.files];
         const coverUrl = main.cover;
 
-        // 解析引用推文 (Quoted Tweet)
+        // 解析引用推文
         if (data.quoted_tweet) {
-            mainbody = cleanTwitterLink(mainbody);
+            const quoteData = data.quoted_tweet;
+            const quoteId = quoteData.id_str || quoteData.tweet_id || "unknown";
+            const quote = extractTweetContent(quoteData, config);
+
+            const processedQuoteText = await processTweetText(ctx, quote.text, quoteId, quoteData, config);
+
+            mainbody += `\n----------\n[引用 @${quote.screenName}]: ${processedQuoteText}`;
+            if (quote.images.length > 0) {
+                mainbody += '\n' + quote.images.map(img => h.image(img).toString()).join('\n');
+            }
+            files.push(...quote.files);
+        }
+
+        return {
+            platform: name,
+            title: `@${screenName} 的推文`,
+            authorName,
+            mainbody,
+            sourceUrl: `https://x.com/${screenName}/status/${tweetId}`,
+            stats: statsString,
+            files,
+            coverUrl
+        };
+
+    } catch (e: any) {
+        logger.error(`Syndication fallback failed: ${e.message}`);
+        // 抛出错误让外部统一处理 404 等信息
+        throw e;
+    }
+}
+
+export async function process(
+    ctx: Context,
+    config: PluginConfig,
+    link: Link,
+    session: Session
+): Promise<ParsedInfo | null> {
+    const logger = ctx.logger(`share-links-analysis:${name}`);
+
+    // 处理短链接
+    let tweetId = link.id;
+    if (link.type === 'short') {
+        try {
+            const reqOptions: any = {redirect: 'follow'};
+            if (config.proxy) reqOptions.proxyAgent = config.proxy;
+
+            const res = await ctx.http('HEAD', link.url, reqOptions);
+            const match = /status\/(\d+)/.exec(res.url);
+            if (match) tweetId = match[1];
+            else throw new Error('无法还原短链接');
+        } catch (e) {
+            logger.warn(`短链接解析失败: ${e}`);
+            return null;
+        }
+    }
+
+    // 首选: VxTwitter API
+    try {
+        const apiUrl = `https://api.vxtwitter.com/Twitter/status/${tweetId}`;
+        logger.debug(`请求 VxAPI: ${apiUrl}`);
+
+        const reqOptions: any = {
+            headers: {
+                'User-Agent': config.userAgent
+            }
+        };
+        if (config.proxy) reqOptions.proxyAgent = config.proxy;
+
+        const data = await ctx.http.get(apiUrl, reqOptions);
+
+        if (!data) throw new Error('VxAPI 返回无效');
+
+        // 敏感内容检查 (VxTwitter 返回 possibly_sensitive)
+        const settings = await getEffectiveSettings(ctx, session.guildId, config);
+        if (data.possibly_sensitive && !settings.nsfw) {
+            if (config.showError) await session.send('内容包含敏感信息，已停止解析');
+            return null;
+        }
+
+        const main = extractVxContent(data);
+        const statsString = `点赞: ${numeral(data.likes, config)} | 评论: ${numeral(data.replies, config)} | 转发: ${numeral(data.retweets, config)}`;
+
+        let processedMainText = await processTweetText(ctx, main.text, tweetId, data, config);
+        let mainbody = escapeHtml(processedMainText);
+
+        if (main.images.length > 0) {
+            mainbody += '\n' + main.images.map(img => h.image(img).toString()).join('\n');
+        }
+
+        const files: FileInfo[] = [...main.files];
+        const coverUrl = main.cover;
+
+        // 解析引用推文
+        if (data.quoted_tweet) {
+            const quoteId = data.quoted_tweet.id_str || data.quoted_tweet.tweet_id || "unknown";
             const quote = extractVxContent(data.quoted_tweet);
-            mainbody += `\n----------\n[引用 @${quote.screenName}]: ${escapeHtml(quote.text)}`;
+
+            const processedQuoteText = await processTweetText(ctx, quote.text, quoteId, data.quoted_tweet, config);
+
+            mainbody += `\n----------\n[引用 @${quote.screenName}]: ${escapeHtml(processedQuoteText)}`;
             if (quote.images.length > 0) {
                 mainbody += '\n' + quote.images.map(img => h.image(img).toString()).join('\n');
             }
@@ -252,117 +408,15 @@ async function handleVxFallback(
             coverUrl
         };
 
-    } catch (e: any) {
-        logger.error(`VxTwitter fallback failed: ${e.message}`);
-        // 这里不再抛出错误给上层，而是返回 null 或让 process 最后的错误处理接管
-        throw e;
-    }
-}
-
-export async function process(
-    ctx: Context,
-    config: PluginConfig,
-    link: Link,
-    session: Session
-): Promise<ParsedInfo | null> {
-    const logger = ctx.logger(`share-links-analysis:${name}`);
-
-    // 处理短链接
-    let tweetId = link.id;
-    if (link.type === 'short') {
-        try {
-            const res = await ctx.http('HEAD', link.url, {redirect: 'follow'});
-            const match = /status\/(\d+)/.exec(res.url);
-            if (match) tweetId = match[1];
-            else throw new Error('无法还原短链接');
-        } catch (e) {
-            logger.warn(`短链接解析失败: ${e}`);
-            return null;
-        }
-    }
-
-    // 尝试首选: Syndication API
-    try {
-        const token = getToken(tweetId);
-        const apiUrl = `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}&lang=en&token=${token}`;
-
-        logger.debug(`请求 API: ${apiUrl}`);
-        const data = await ctx.http.get(apiUrl, {
-            headers: {
-                'User-Agent': config.userAgent,
-                'Accept': '*/*'
-            }
-        });
-
-        if (!data || !data.text) {
-            throw new Error('API 返回数据无效或推文不存在');
-        }
-
-        // 敏感内容检查
-        const settings = await getEffectiveSettings(ctx, session.guildId, config);
-        if (data.possibly_sensitive && !settings.nsfw) {
-            if (config.showError) await session.send('内容包含敏感信息，已停止解析');
-            return null;
-        }
-
-        // 数据提取 (Syndication Logic)
-        const user = data.user;
-        const authorName = user?.name || 'Unknown';
-        const screenName = user?.screen_name || 'unknown';
-        const statsString = `点赞: ${numeral(data.favorite_count, config)} | 评论: ${numeral(data.conversation_count, config)}`;
-
-        // 解析主推文
-        const main = extractTweetContent(data, config);
-
-        // 构建主推文正文
-        let mainbody = main.text;
-        if (main.images.length > 0) {
-            mainbody += '\n' + main.images.map(img => h.image(img).toString()).join('\n');
-        }
-
-        const files: FileInfo[] = [...main.files];
-        const coverUrl = main.cover;
-
-        // 解析引用推文 (Quoted Tweet)
-        if (data.quoted_tweet) {
-            // 如果存在引用推文，主推文文末通常会有一个指向该引用的链接，需要移除
-            mainbody = cleanTwitterLink(mainbody);
-
-            const quoteData = data.quoted_tweet;
-            const quote = extractTweetContent(quoteData, config);
-
-            // 追加引用推文内容
-            mainbody += `\n----------\n[引用 @${quote.screenName}]: ${quote.text}`;
-
-            // 追加引用推文图片
-            if (quote.images.length > 0) {
-                mainbody += '\n' + quote.images.map(img => h.image(img).toString()).join('\n');
-            }
-
-            // 追加引用推文视频到文件列表
-            files.push(...quote.files);
-        }
-
-        return {
-            platform: name,
-            title: `@${screenName} 的推文`,
-            authorName,
-            mainbody,
-            sourceUrl: `https://x.com/${screenName}/status/${tweetId}`,
-            stats: statsString,
-            files,
-            coverUrl
-        };
-
     } catch (error: any) {
-        // 如果是 429 (Rate Limit) 或其他非 404 错误，尝试 Fallback
-        // 404 通常意味着推文真的没了，但有时候 API 抽风也会 404
+        // 如果是 429 (Rate Limit) 或其他非 404 错误，尝试 Fallback 到 Syndication
+        // 404 通常意味着推文真的没了
         const isNotFound = error.response?.status === 404;
 
         if (!isNotFound) {
-            logger.warn(`Syndication API 失败 (${error.message})，尝试 VxTwitter Fallback...`);
+            logger.warn(`VxTwitter API 失败 (${error.message})，尝试 Syndication API Fallback...`);
             try {
-                return await handleVxFallback(ctx, config, tweetId, session);
+                return await handleSyndicationFallback(ctx, config, tweetId, session);
             } catch (fallbackError: any) {
                 logger.error(`Fallback 失败: ${fallbackError.message}`);
             }

@@ -2,7 +2,7 @@
   "name": "koishi-plugin-share-links-analysis",
   "description": "自用插件",
   "license": "MIT",
-  "version": "0.9.3",
+  "version": "0.10.0",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -23,8 +23,7 @@
     "plugin"
   ],
   "peerDependencies": {
-    "koishi": "^4.16.8",
-    "koishi-plugin-bilibili-login": "^0.1.50"
+    "koishi": "^4.16.8"
   },
   "dependencies": {
     "cheerio": "^1.0.0-rc.12"

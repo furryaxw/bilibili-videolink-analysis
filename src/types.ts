@@ -114,10 +114,9 @@ export interface BilibiliVideoInfo {
     };
 }
 
-// 解决 ctx.BiliBiliVideo 和 ctx.puppeteer 的类型报错，以及新增的 DB 类型
+// 解决 ctx.puppeteer 的类型报错，以及新增的 DB 类型
 declare module 'koishi' {
     interface Context {
-        BiliBiliVideo: any;
         puppeteer?: any;
     }
 
