@@ -266,12 +266,6 @@ async function handleSyndicationFallback(
             throw new Error('Syndication API 返回数据无效或推文不存在');
         }
 
-        // 敏感内容检查
-        const settings = await getEffectiveSettings(ctx, session.guildId, config);
-        if (data.possibly_sensitive && !settings.nsfw) {
-            if (config.showError) await session.send('内容包含敏感信息，已停止解析 (Fallback)');
-            return null;
-        }
 
         const user = data.user;
         const authorName = user?.name || 'Unknown';
@@ -302,6 +296,22 @@ async function handleSyndicationFallback(
                 mainbody += '\n' + quote.images.map(img => h.image(img).toString()).join('\n');
             }
             files.push(...quote.files);
+        }
+
+        // 敏感内容检查
+        const settings = await getEffectiveSettings(ctx, session.guildId, config);
+        if (data.possibly_sensitive && !settings.nsfw) {
+            if (config.showError) await session.send('内容包含敏感信息，已停止解析\n如果你是管理员，你可以通过#help share指令获取更多帮助');
+            return {
+                platform: name,
+                title: `@${screenName} 的推文`,
+                authorName,
+                mainbody: escapeHtml("内容包含敏感信息，已停止解析\n如果你是管理员，你可以通过#help share指令获取更多帮助"),
+                sourceUrl: `https://x.com/${screenName}/status/${tweetId}`,
+                stats: statsString,
+                files: [],
+                coverUrl
+            };
         }
 
         return {
@@ -363,13 +373,6 @@ export async function process(
 
         if (!data) throw new Error('VxAPI 返回无效');
 
-        // 敏感内容检查 (VxTwitter 返回 possibly_sensitive)
-        const settings = await getEffectiveSettings(ctx, session.guildId, config);
-        if (data.possibly_sensitive && !settings.nsfw) {
-            if (config.showError) await session.send('内容包含敏感信息，已停止解析');
-            return null;
-        }
-
         const main = extractVxContent(data);
         const statsString = `点赞: ${numeral(data.likes, config)} | 评论: ${numeral(data.replies, config)} | 转发: ${numeral(data.retweets, config)}`;
 
@@ -395,6 +398,21 @@ export async function process(
                 mainbody += '\n' + quote.images.map(img => h.image(img).toString()).join('\n');
             }
             files.push(...quote.files);
+        }
+
+        // 敏感内容检查 (VxTwitter 返回 possibly_sensitive)
+        const settings = await getEffectiveSettings(ctx, session.guildId, config);
+        if (data.possibly_sensitive && !settings.nsfw) {
+            return {
+                platform: name,
+                title: `@${main.screenName} 的推文`,
+                authorName: main.authorName,
+                mainbody: escapeHtml("内容包含敏感信息，已停止解析\n如果你是管理员，你可以通过#help share指令获取更多帮助"),
+                sourceUrl: `https://x.com/${main.screenName}/status/${tweetId}`,
+                stats: statsString,
+                files: [],
+                coverUrl
+            };
         }
 
         return {

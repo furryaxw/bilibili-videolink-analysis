@@ -95,6 +95,13 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
     }).description("默认解析器设置"),
 
     Schema.object({
+        youtube_pythonApiUrl: Schema.string().role('link').description(
+            '外挂 Python 解析服务的 API 地址，需要专用解析服务。<br>' +
+            '<a href="https://github.com/furryaxw/share-links-analysis/blob/Master/README.md" target="_blank">点击此处查看部署方式</a>'
+        ).default('http://127.0.0.1:12001/api/parse'),
+    }).description('YouTube 解析设置'),
+
+    Schema.object({
         onebotReadDir: Schema.string().description('OneBot 实现 (如 NapCat) 所在的容器或环境提供的路径前缀。').default("/app/.config/QQ/NapCat/temp"),
         localDownloadDir: Schema.string().description('与上述路径对应的、Koishi 所在的容器或主机可以访问的路径前缀。').default("/koishi/data/temp"),
     }).description('跨环境路径映射设置'),
@@ -223,32 +230,27 @@ export function apply(ctx: Context, config: PluginConfig) {
         .action(async ({session}, parser, value) => {
             if (!session?.guildId || !session?.userId) return '该指令只能在群组中使用。';
             if (!await isUserAdmin(session, session.userId)) return '权限不足'
-            if (parser) {
-                type ParserName = typeof parsers_str[number];
-                const isValidParser = (name: string): name is ParserName =>
-                    (parsers_str as readonly string[]).includes(name);
+            type ParserName = typeof parsers_str[number];
+            const isValidParser = (name: string): name is ParserName =>
+                (parsers_str as readonly string[]).includes(name);
 
-                if (!isValidParser(parser)) return '请输入正确的解析器名称';
-                if (!value) return '请输入正确的模式';
-                const mode = value.trim().toLowerCase() === 'true'
+            if (!isValidParser(parser)) return '请输入正确的解析器名称';
+            if (!value) return '请输入正确的模式';
+            const mode = value.trim().toLowerCase() === 'true'
 
-                const data = await ctx.database.get('sla_group_settings', session.guildId);
-                const final_parsers = {...data[0]?.custom_parsers, ...{[parser]: mode}};
-                const record = {guildId: session.guildId, custom_parsers: final_parsers};
-                await ctx.database.upsert('sla_group_settings', [record]);
-            }
-            await session.execute('share');
+            const data = await ctx.database.get('sla_group_settings', session.guildId);
+            const final_parsers = {...data[0]?.custom_parsers, ...{[parser]: mode}};
+            const record = {guildId: session.guildId, custom_parsers: final_parsers};
+            await ctx.database.upsert('sla_group_settings', [record]);
         });
 
     cmd.subcommand('.nsfw [value:string]', '设置是否允许 NSFW 内容', {authority: 1})
         .action(async ({session}, value) => {
             if (!session?.guildId || !session?.userId) return '该指令只能在群组中使用。';
             if (!await isUserAdmin(session, session.userId)) return '权限不足'
-            if (value) {
-                const mode = value.trim().toLowerCase() === 'true'
-                const record = {guildId: session.guildId, nsfw_enabled: mode};
-                await ctx.database.upsert('sla_group_settings', [record]);
-            }
+            const mode = value.trim().toLowerCase() === 'true'
+            const record = {guildId: session.guildId, nsfw_enabled: mode};
+            await ctx.database.upsert('sla_group_settings', [record]);
             await session.execute('share');
         });
 
@@ -441,7 +443,7 @@ export function apply(ctx: Context, config: PluginConfig) {
                 const settings = await getEffectiveSettings(ctx, session.guildId, config)
                 if (!settings.parsers[link.platform]) {
                     logger.debug(`根据策略，该链接已被阻止解析：平台：${link.platform}，链接：${link.url}`);
-                    if (config.showError) await session.send(`根据策略，该链接已被阻止解析：平台：${link.platform}`);
+                    if (config.showError) await session.send(`根据策略，该链接已被阻止解析：平台：${link.platform}\n如果你是管理员，你可以通过#help share指令获取更多帮助`);
                     continue
                 }
             } else {
