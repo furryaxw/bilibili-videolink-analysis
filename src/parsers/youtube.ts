@@ -73,16 +73,13 @@ export async function process(
         const likes = response.likes ? numeral(response.likes, config) : '未知';
         const comments = response.comments ? numeral(response.comments, config) : '未知';
 
-        let desc = response.description || '';
-        if (desc.length > 300) desc = desc.substring(0, 300) + '...';
-
         logger.debug(`[解析成功] 拿到视频直链: ${response.direct_url.substring(0, 50)}...`);
 
         return {
             platform: name,
             title: response.title,
             authorName: response.author,
-            mainbody: escapeHtml(desc),
+            mainbody: escapeHtml(response.description),
             coverUrl: response.cover,
             files: [{type: 'video', url: response.direct_url}],
             sourceUrl: videoUrl,
