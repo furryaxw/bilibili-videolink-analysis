@@ -5,10 +5,13 @@ import logging
 import os
 import subprocess
 import sys
+import urllib.parse
 from contextlib import asynccontextmanager
 
+import httpx
 import yt_dlp
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 # =====================================
@@ -70,9 +73,18 @@ class ParseRequest(BaseModel):
 
 
 @app.post("/api/parse")
-def parse_youtube(req: ParseRequest):
+async def parse_youtube(req: ParseRequest, request: Request):
+    if req.clarity_priority == "2":
+        # 高画质优先：寻找原生包含音视频的最高画质 MP4 (通常最高为 720p)
+        format_selection = "best[ext=mp4]/best"
+    else:
+        # 低画质优先：限制最高不超过 480p 的预封装 MP4，兼顾节省带宽与基本可看性
+        # 如果没有 480p 及其以下的，则回退到最差的画质兜底
+        format_selection = "best[height<=480][ext=mp4]/worst[ext=mp4]/worst"
+
     ydl_opts = {
         "proxy": proxy,
+        "format": format_selection,
         "js_runtimes": {"node": {}},
         "remote_components": ["ejs:github"],
         "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
@@ -87,38 +99,17 @@ def parse_youtube(req: ParseRequest):
             # 只提取信息，不下载实体文件
             info = ydl.extract_info(req.url, download=False)
 
-            formats = info.get("formats", [])
-            # 过滤：找 https 协议、带视频轨、带音频轨的 mp4 直链 (排除 m3u8)
-            direct_formats = [
-                f for f in formats
-                if f.get("ext") == "mp4"
-                   and f.get("vcodec") != "none"
-                   and f.get("acodec") != "none"
-                   and f.get("protocol") in ["https", "http"]
-            ]
+            raw_url = info.get("url")
+            if not raw_url:
+                raise ValueError("未能找到可用的音视频直链")
 
-            # 排序：按分辨率从小到大
-            direct_formats.sort(key=lambda x: x.get("height", 0))
+            # 构造流式代理 URL，提供给 Koishi
+            base_url = str(request.base_url)
+            encoded_raw_url = urllib.parse.quote(raw_url, safe="")
 
-            selected_format = None
-            if direct_formats:
-                if req.clarity_priority == "2":  # 高画质优先
-                    selected_format = direct_formats[-1]
-                else:  # 低画质优先 (寻找最接近 720p 的)
-                    selected_format = next((f for f in reversed(direct_formats) if f.get("height", 0) >= 720),
-                                           direct_formats[-1])
-            else:
-                # 实在找不到封装好的，找最高画质的混合流兜底
-                video_only = [f for f in formats if
-                              f.get("vcodec") != "none" and f.get("protocol") in ["https", "http"]]
-                if video_only:
-                    video_only.sort(key=lambda x: x.get("height", 0))
-                    selected_format = video_only[-1]
+            # 拼接流式透传通道的地址
+            stream_url = f"{base_url}api/stream?video_url={encoded_raw_url}"
 
-            if not selected_format:
-                raise ValueError("未能找到可用的视频直链")
-
-            # 返回给 Koishi 数据结构
             return {
                 "success": True,
                 "title": info.get("title", "未知标题"),
@@ -128,13 +119,65 @@ def parse_youtube(req: ParseRequest):
                 "views": info.get("view_count", 0),
                 "likes": info.get("like_count", 0),
                 "comments": info.get("comment_count", 0),
-                "direct_url": selected_format.get("url")
+                "direct_url": stream_url
             }
 
     except Exception as e:
         logging.error(f"解析失败: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
 
+
+@app.api_route("/api/stream", methods=["GET", "HEAD"])
+async def proxy_stream(request: Request, video_url: str):
+    """
+    核心代理流式传输管道。
+    负责响应 Koishi 发来的 HEAD 请求 (大小探测) 和 GET 请求 (实际下载)。
+    """
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+    # 无缝透传 Koishi 发来的 Range 头，支持断点续传或探测请求
+    if "range" in request.headers:
+        headers["Range"] = request.headers["range"]
+
+    client = httpx.AsyncClient(proxy=proxy, verify=False, follow_redirects=True)
+
+    try:
+        # 如果是 Koishi 的 getFileSize 探测请求
+        if request.method == "HEAD":
+            resp = await client.head(video_url, headers=headers)
+            return Response(
+                status_code=resp.status_code,
+                headers={
+                    "Content-Length": resp.headers.get("Content-Length", ""),
+                    "Accept-Ranges": resp.headers.get("Accept-Ranges", "bytes"),
+                    "Content-Type": resp.headers.get("Content-Type", "video/mp4")
+                }
+            )
+
+        # 如果是正式下载请求，建立流式通道
+        req = client.build_request("GET", video_url, headers=headers)
+        resp = await client.send(req, stream=True)
+
+        # 保留必要的响应头回传给 Koishi
+        resp_headers = {
+            "Content-Length": resp.headers.get("Content-Length", ""),
+            "Content-Range": resp.headers.get("Content-Range", ""),
+            "Accept-Ranges": resp.headers.get("Accept-Ranges", "bytes"),
+            "Content-Type": resp.headers.get("Content-Type", "video/mp4")
+        }
+        resp_headers = {k: v for k, v in resp_headers.items() if v}
+
+        # 启动流式响应返回数据，结束时自动关闭连接释放内存
+        return StreamingResponse(
+            resp.aiter_bytes(chunk_size=1024 * 1024), # 每次透传 1MB 数据块
+            status_code=resp.status_code,
+            headers=resp_headers,
+            background=client.aclose
+        )
+    except Exception as e:
+        await client.aclose()
+        logging.error(f"流媒体代理中断: {str(e)}")
+        raise HTTPException(status_code=500, detail="视频流传输中断")
 
 if __name__ == "__main__":
     import uvicorn

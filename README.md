@@ -38,7 +38,7 @@ wget https://raw.githubusercontent.com/furryaxw/share-links-analysis/Master/yt_s
 
 **2. 安装 Python 依赖**
 ```bash
-pip install fastapi uvicorn yt-dlp
+pip install httpx fastapi uvicorn yt-dlp
 ```
 
 **3. 配置网络代理 (重要)**
