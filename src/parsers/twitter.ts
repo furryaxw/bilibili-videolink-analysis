@@ -20,30 +20,41 @@ const linkRules = [
 /**
  * 在文本中匹配 Twitter/X 链接
  */
-export function match(content: string): Link[] {
+export async function match(content: string, ctx: Context, config: PluginConfig): Promise<Link[]> {
     const results: Link[] = [];
     const seen = new Set<string>();
+    const initialLinks: Link[] = [];
 
     for (const rule of linkRules) {
-        let match;
-        while ((match = rule.pattern.exec(content)) !== null) {
-            const id = match[2] || match[1]; // short link 只有 group 1
-            const url = rule.type === 'short'
-                ? `https://t.co/${id}`
-                : `https://x.com/${match[1]}/status/${id}`;
-
-            if (seen.has(url)) continue;
-            seen.add(url);
-
-            results.push({
-                platform: name,
-                type: rule.type,
-                id: id,
-                url: url,
-            });
+        let m;
+        rule.pattern.lastIndex = 0;
+        while ((m = rule.pattern.exec(content)) !== null) {
+            const id = m[2] || m[1];
+            const url = rule.type === 'short' ? `https://t.co/${id}` : `https://x.com/${m[1]}/status/${id}`;
+            initialLinks.push({ platform: name, type: rule.type, id, url });
         }
     }
 
+    for (const link of initialLinks) {
+        let finalLink = link;
+        if (link.type === 'short') {
+            try {
+                const reqOptions: any = { redirect: 'follow' };
+                if (config.proxy) reqOptions.proxyAgent = config.proxy;
+                const res = await ctx.http('HEAD', link.url, reqOptions);
+                const match = /status\/(\d+)/.exec(res.url);
+                if (match) {
+                    finalLink = { platform: name, type: 'tweet', id: match[1], url: `https://x.com/i/status/${match[1]}` };
+                }
+            } catch (e) { }
+        }
+
+        const key = `${finalLink.type}:${finalLink.id}`;
+        if (!seen.has(key)) {
+            seen.add(key);
+            results.push(finalLink);
+        }
+    }
     return results;
 }
 
@@ -340,23 +351,7 @@ export async function process(
 ): Promise<ParsedInfo | null> {
     const logger = ctx.logger(`share-links-analysis:${name}`);
 
-    // 处理短链接
-    let tweetId = link.id;
-    if (link.type === 'short') {
-        try {
-            const reqOptions: any = {redirect: 'follow'};
-            if (config.proxy) reqOptions.proxyAgent = config.proxy;
-
-            const res = await ctx.http('HEAD', link.url, reqOptions);
-            const match = /status\/(\d+)/.exec(res.url);
-            if (match) tweetId = match[1];
-            else throw new Error('无法还原短链接');
-        } catch (e) {
-            logger.warn(`短链接解析失败: ${e}`);
-            return null;
-        }
-    }
-
+    const tweetId = link.id;
     // 首选: VxTwitter API
     try {
         const apiUrl = `https://api.vxtwitter.com/Twitter/status/${tweetId}`;

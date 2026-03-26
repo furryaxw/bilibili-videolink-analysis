@@ -20,7 +20,9 @@ const PLATFORM_DOMAINS = {
     'youtube': ['youtube.com', 'google.com'],
     'twitter': ['x.com', 'twitter.com', 'twimg.com'],
     'xiaohongshu': ['xiaohongshu.com'],
-    'bilibili': ['bilibili.com']
+    'bilibili': ['bilibili.com'],
+    'qqmusic': ['qq.com', 'y.qq.com'],
+    'netease': ['163.com', 'music.163.com']
 };
 
 /**

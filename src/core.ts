@@ -7,11 +7,13 @@ import * as Xiaohongshu from './parsers/xiaohongshu';
 import * as Twitter from './parsers/twitter';
 import * as Xiaoheihe from './parsers/xiaoheihe';
 import * as Youtube from './parsers/youtube';
+import * as Netease from './parsers/netease';
+import * as QQMusic from './parsers/qqmusic';
 
 // 定义一个接口来描述你的 Parser 模块结构
 interface ParserModule {
     name: string;
-    match: (content: string) => Link[];
+    match: (content: string, ctx: Context, config: PluginConfig) => Promise<Link[]>;
     init?: (ctx: Context, config: PluginConfig) => Promise<any> | any;
     lc_get_cookie?: (ctx: Context, config: PluginConfig) => Promise<string>;
     process: (ctx: Context, config: PluginConfig, link: Link, session: Session) => Promise<ParsedInfo | null>;
@@ -20,18 +22,20 @@ interface ParserModule {
 
 // 强制将数组识别为 ParserModule 列表
 // 这样如果某个模块忘了导出 name，IDE 这里直接就会报错提醒你，非常安全
-export const parsers: ParserModule[] = [Bilibili, Xiaohongshu, Twitter, Xiaoheihe, Youtube];
+export const parsers: ParserModule[] = [Bilibili, Xiaohongshu, Twitter, Xiaoheihe, Youtube, Netease, QQMusic];
 export const parsers_str = parsers.map(p => p.name);
 
 /**
  * 从文本中解析出所有支持的链接
  * @param content 消息内容
+ * @param ctx Koishi Context
+ * @param config 插件配置
  * @returns 解析出的链接对象数组
  */
-export function resolveLinks(content: string): Link[] {
+export async function resolveLinks(content: string, ctx: Context, config: PluginConfig): Promise<Link[]> {
     const allLinks: Link[] = [];
     for (const parser of parsers) {
-        const links = parser.match(content);
+        const links = await parser.match(content, ctx, config);
         allLinks.push(...links);
     }
     return allLinks;

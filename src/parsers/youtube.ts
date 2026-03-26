@@ -26,18 +26,19 @@ const linkRules = [
     }
 ];
 
-export function match(content: string): Link[] {
+export async function match(content: string, ctx: Context, config: PluginConfig): Promise<Link[]> {
     const results: Link[] = [];
     const seen = new Set<string>();
 
     for (const rule of linkRules) {
         let match;
+        rule.pattern.lastIndex = 0;
         while ((match = rule.pattern.exec(content)) !== null) {
             const id = match[1];
-            const url = `https://www.youtube.com/watch?v=${id}`;
-            if (seen.has(url)) continue;
-            seen.add(url);
-            results.push({platform: name, type: rule.type, id, url});
+            const key = `${rule.type}:${id}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            results.push({ platform: name, type: rule.type, id, url: `https://www.youtube.com/watch?v=${id}` });
         }
     }
     return results;
@@ -45,20 +46,20 @@ export function match(content: string): Link[] {
 
 export async function process(
     ctx: Context,
-    config: PluginConfig & { youtube_pythonApiUrl?: string },
+    config: PluginConfig & { youtube_ApiUrl?: string },
     link: Link,
     session: Session
 ): Promise<ParsedInfo | null> {
     const logger = ctx.logger(`share-links-analysis:${name}`);
     const videoUrl = link.url;
 
-    const apiUrl = config.youtube_pythonApiUrl || 'http://127.0.0.1:12001/api/parse';
+    const apiUrl = config.youtube_ApiUrl || 'http://127.0.0.1:12001';
 
     try {
         logger.debug(`正在请求解析: ${link.id}`);
 
         // 发送 POST 请求给 Python 服务
-        const response = await ctx.http.post(apiUrl, {
+        const response = await ctx.http.post(`${apiUrl}/api/parse`, {
             url: videoUrl,
             clarity_priority: config.Video_ClarityPriority
         }, {

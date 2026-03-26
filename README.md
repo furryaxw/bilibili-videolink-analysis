@@ -8,14 +8,18 @@
 
 ## 鸣谢 💖
 
-特别鸣谢以下项目的支持：
+本插件的解析能力与稳定运行，离不开以下开源项目及社区文档的强大支撑。特此向这些项目及其维护者致以最诚挚的感谢：
 
 - [koishi-plugin-bilibili-videolink-analysis](https://github.com/shangxueink/koishi-shangxue-apps/tree/main/plugins/bilibili-videolink-analysis)
 - [koishi-plugin-bili-parser](https://github.com/summonhim/koishi-plugin-bili-parser)
+- [bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)
 - [koishi-plugin-xiaohongshu](https://www.npmjs.com/package/koishi-plugin-xiaohongshu)
 以及解析方式原作者：[@MuJie](https://mu-jie.cc/)
 - [BetterTwitFix](https://github.com/dylanpdx/BetterTwitFix)
-- [You-Get](https://you-get.org/)
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+- [NeteaseCloudMusicApiEnhanced](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced)
+
+---
 
 ## 🚀 YouTube 解析后端部署指南 (必看)
 

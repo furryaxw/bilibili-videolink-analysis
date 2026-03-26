@@ -19,23 +19,24 @@ const linkRules = [
     }
 ];
 
-export function match(content: string): Link[] {
+export async function match(content: string, ctx: Context, config: PluginConfig): Promise<Link[]> {
     const results: Link[] = [];
+    const seen = new Set<string>();
+
     for (const rule of linkRules) {
-        const match = content.match(rule.pattern);
-        if (match) {
-            for (const fullUrl of match) {
-                let id: string | undefined
-                if (rule.type == "bbs") id = fullUrl.match(/\w+$/)?.[0];
-                else if (rule.type == "bbs_api") id = fullUrl.match(/link_id=\w+/gi)?.[0].slice(8);
-                if (id) {
-                    results.push({
-                        platform: name,
-                        type: rule.type,
-                        id,
-                        url: `https://www.xiaoheihe.cn/app/bbs/link/${id}`,
-                    });
-                }
+        let match;
+        rule.pattern.lastIndex = 0;
+        while ((match = rule.pattern.exec(content)) !== null) {
+            const fullUrl = match[0];
+            let id: string | undefined;
+            if (rule.type == "bbs") id = fullUrl.match(/\w+$/)?.[0];
+            else if (rule.type == "bbs_api") id = fullUrl.match(/link_id=\w+/gi)?.[0].slice(8);
+
+            if (id) {
+                const key = `${rule.type}:${id}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                results.push({platform: name, type: rule.type, id, url: `https://www.xiaoheihe.cn/app/bbs/link/${id}`});
             }
         }
     }

@@ -190,70 +190,76 @@ const bvPattern = /(?<![a-zA-Z0-9/])(BV[1-9A-HJ-NP-Za-km-z]{10})(?![a-zA-Z0-9])/
 
 /**
  * 在文本中匹配B站链接
- * @param content 消息内容
- * @returns 匹配到的链接对象数组
  */
-export function match(content: string): Link[] {
+export async function match(content: string, ctx: Context, config: PluginConfig): Promise<Link[]> {
     const results: Link[] = [];
     const seen = new Set<string>();
 
-    for (const {pattern, type} of linkRules) {
-        let match;
-        // 重置 regex lastIndex
-        pattern.lastIndex = 0;
-        while ((match = pattern.exec(content)) !== null) {
-            let id = match[1];
-            if (!id) continue;
+    // 内部帮助函数：运行正则提取
+    function extractLinks(text: string): Link[] {
+        const extracted: Link[] = [];
+        for (const { pattern, type } of linkRules) {
+            let m;
+            pattern.lastIndex = 0;
+            while ((m = pattern.exec(text)) !== null) {
+                let id = m[1];
+                if (!id) continue;
+                if (type === 'video' && id.toLowerCase().startsWith('av')) {
+                    try { id = avToBv(id); } catch (e) { }
+                }
+                let url = m[0];
+                if (type === 'video') url = `https://www.bilibili.com/video/${id}`;
+                else if (type !== 'short' && !url.startsWith('http')) url = `https://${url}`;
+                extracted.push({ platform: name, type, id, url });
+            }
+        }
+        let bvMatch;
+        bvPattern.lastIndex = 0;
+        while ((bvMatch = bvPattern.exec(text)) !== null) {
+            extracted.push({ platform: name, type: 'video', id: bvMatch[1], url: `https://www.bilibili.com/video/${bvMatch[1]}` });
+        }
+        return extracted;
+    }
 
-            // 如果是视频类型且是av号，转换为BV号
-            if (type === 'video' && id.toLowerCase().startsWith('av')) {
+    const initialLinks = extractLinks(content);
+
+    for (const link of initialLinks) {
+        let finalLink = link;
+
+        if (link.type === 'short') {
+            let finalUrl = '';
+            try {
+                const response = await ctx.http(link.url, { method: 'GET', headers: { 'User-Agent': config.userAgent }, redirect: 'manual' });
+                finalUrl = response.headers.get('location') || '';
+            } catch (e: any) {
+                finalUrl = e.response?.headers?.location || '';
+            }
+
+            if ((!finalUrl || finalUrl.includes('b23.tv')) && ctx.puppeteer) {
+                let page = null;
                 try {
-                    id = avToBv(id);
-                } catch (e) {
-                    // 转换失败则保持原样
+                    page = await ctx.puppeteer.page();
+                    await page.setUserAgent(config.userAgent);
+                    await page.goto(link.url, { waitUntil: 'domcontentloaded' });
+                    finalUrl = page.url();
+                } catch (e: any) { } finally {
+                    if (page) await page.close();
                 }
             }
 
-            // 构造标准 URL
-            let url = match[0];
-            if (type === 'video') {
-                // 视频类型统一使用 BV 号 URL，以便去重
-                url = `https://www.bilibili.com/video/${id}`;
-            } else {
-                if (!url.startsWith('http')) {
-                    url = `https://${url}`;
-                }
+            if (finalUrl && !finalUrl.includes('b23.tv')) {
+                const resolvedLinks = extractLinks(finalUrl);
+                if (resolvedLinks.length > 0) finalLink = resolvedLinks[0]; // 替换为真实的视频/动态对象
             }
+        }
 
-            if (seen.has(url)) continue;
-            seen.add(url);
-
-            results.push({
-                platform: name,
-                type,
-                id,
-                url,
-            });
+        // 使用 [类型+ID] 强力去重
+        const key = `${finalLink.type}:${finalLink.id}`;
+        if (!seen.has(key)) {
+            seen.add(key);
+            results.push(finalLink);
         }
     }
-
-    // 匹配独立的 BV 号（不包含在链接中）
-    let bvMatch;
-    while ((bvMatch = bvPattern.exec(content)) !== null) {
-        const videoId = bvMatch[1];
-        const url = `https://www.bilibili.com/video/${videoId}`;
-
-        if (seen.has(url)) continue;
-        seen.add(url);
-
-        results.push({
-            platform: name,
-            type: 'video',
-            id: videoId,
-            url,
-        });
-    }
-
     return results;
 }
 
@@ -269,62 +275,7 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
     const logger = ctx.logger(`share-links-analysis:${name}`);
     let currentLink = link;
 
-    // --- 1. 短链接解析 ---
-    if (currentLink.type === 'short') {
-        let finalUrl = '';
-        // 尝试 HTTP HEAD/GET 获取跳转
-        try {
-            const response = await ctx.http(currentLink.url, {
-                method: 'GET', // 部分短链接需要 GET 才能拿到 location
-                headers: {'User-Agent': config.userAgent},
-                redirect: 'manual',
-            });
-            const locationHeader = response.headers.get('location');
-            if (locationHeader) finalUrl = locationHeader;
-        } catch (e: any) {
-            const locationHeader = e.response?.headers?.location;
-            if (locationHeader) finalUrl = locationHeader;
-            if (!finalUrl) logger.debug(`HTTP解析短链接失败: ${e.message}`);
-        }
-
-        // 检查解析结果是否依然是短链接或无效
-        if (finalUrl && (finalUrl.includes('b23.tv') || (finalUrl.includes('bilibili.com') && finalUrl.length < 30))) {
-            finalUrl = ''; // 视为解析未彻底完成
-        }
-
-        // Puppeteer 后备方案
-        if (!finalUrl && ctx.puppeteer) {
-            logger.info(`切换至Puppeteer解析短链接: ${currentLink.url}`);
-            let page = null;
-            try {
-                page = await ctx.puppeteer.page();
-                await page.setUserAgent(config.userAgent);
-                await page.goto(currentLink.url, {waitUntil: 'domcontentloaded'});
-                finalUrl = page.url();
-            } catch (e: any) {
-                logger.error(`Puppeteer解析失败: ${e.message}`);
-            } finally {
-                if (page) await page.close();
-            }
-        }
-
-        if (finalUrl) {
-            logger.debug(`短链接指向: ${finalUrl}`);
-            const matchedLinks = match(finalUrl);
-            if (matchedLinks.length > 0) {
-                // 更新当前链接信息为解析后的真实链接
-                currentLink = matchedLinks[0];
-            } else {
-                logger.warn(`在跳转链接中未识别到支持的B站内容: ${finalUrl}`);
-                return null;
-            }
-        } else {
-            logger.error('短链接解析失败');
-            return null;
-        }
-    }
-
-    // --- 2. 根据类型分发处理逻辑 ---
+    // --- 根据类型分发处理逻辑 ---
 
     // === Video (视频) ===
     if (currentLink.type === 'video') {

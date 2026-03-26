@@ -62,8 +62,13 @@ export interface PluginConfig {
     // 代理设置
     proxy: string;
     proxy_settings: Record<string, boolean>;
+
+    // 解析器设置
     default_parsers: Record<string, boolean>;
     allow_sensitive: boolean;
+
+    youtube_ApiUrl: string;
+    netease_apiUrl: string;
 
     // 跨环境路径映射设置
     onebotReadDir: string;

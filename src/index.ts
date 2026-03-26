@@ -95,11 +95,18 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
     }).description("默认解析器设置"),
 
     Schema.object({
-        youtube_pythonApiUrl: Schema.string().role('link').description(
-            '外挂 Python 解析服务的 API 地址，需要专用解析服务。<br>' +
+        youtube_ApiUrl: Schema.string().role('link').description(
+            '外挂 Python 解析服务的 API 地址，需要专用解析服务<br>' +
             '<a href="https://github.com/furryaxw/share-links-analysis/blob/Master/README.md" target="_blank">点击此处查看部署方式</a>'
         ).default('http://127.0.0.1:12001/api/parse'),
     }).description('YouTube 解析设置'),
+
+    Schema.object({
+        netease_apiUrl: Schema.string().role('link').description(
+            '网易云音乐 API (NeteaseCloudMusicApi) 的地址<br>' +
+            '<a href="https://docs-neteasecloudmusicapi.focalors.ltd/#/?id=neteasecloudmusicapienhanced" target="_blank">点击此处查看部署方式</a>'
+        ).default('http://127.0.0.1:3000'),
+    }).description('网易云音乐设置'),
 
     Schema.object({
         onebotReadDir: Schema.string().description('OneBot 实现 (如 NapCat) 所在的容器或环境提供的路径前缀。').default("/app/.config/QQ/NapCat/temp"),
@@ -433,7 +440,7 @@ export function apply(ctx: Context, config: PluginConfig) {
 
         const content = session.content.replace(/\\/g, '').replace(/&amp;/g, '&');
         const channelId = session.channelId;
-        const links = resolveLinks(content);
+        const links = await resolveLinks(content, ctx, config);
 
         if (links.length === 0) return next();
 

@@ -26,39 +26,53 @@ const linkRules = [
 
 /**
  * 在文本中匹配小红书链接 (长链接或短链接)
- * @param content 消息内容
- * @returns 匹配到的链接对象数组
  */
-export function match(content: string): Link[] {
+export async function match(content: string, ctx: Context, config: PluginConfig): Promise<Link[]> {
     const results: Link[] = [];
     const seen = new Set<string>();
+    const initialLinks: Link[] = [];
 
-    for (const {pattern, type} of linkRules) {
-        let match;
-        while ((match = pattern.exec(content)) !== null) {
-            const idPart = match[1];
+    for (const { pattern, type } of linkRules) {
+        let m;
+        pattern.lastIndex = 0;
+        while ((m = pattern.exec(content)) !== null) {
+            const idPart = m[1];
             if (!idPart) continue;
-
             const cleanId = idPart.split('?')[0];
             const host = type === "short" ? "xhslink.com" : "www.xiaohongshu.com";
-            const pathPrefix = type === "short"
-                ? (idPart.startsWith('m/') ? 'm/' : '')
-                : (type === "discovery" ? "discovery/item/" : "explore/");
-
-            const url = `https://${host}/${pathPrefix}${idPart}`;
-
-            if (seen.has(url)) continue;
-            seen.add(url);
-
-            results.push({
-                platform: name,
-                type,
-                id: cleanId,
-                url,
-            });
+            const pathPrefix = type === "short" ? (idPart.startsWith('m/') ? 'm/' : '') : (type === "discovery" ? "discovery/item/" : "explore/");
+            initialLinks.push({ platform: name, type, id: cleanId, url: `https://${host}/${pathPrefix}${idPart}` });
         }
     }
 
+    for (const link of initialLinks) {
+        let finalLink = link;
+        if (link.type === 'short') {
+            try {
+                let finalUrl = '';
+                try {
+                    await ctx.http(link.url, { method: 'GET', headers: { 'User-Agent': config.userAgent }, redirect: 'manual' });
+                } catch (e: any) {
+                    finalUrl = e.response?.headers?.location || '';
+                }
+
+                if (finalUrl) {
+                    const idMatch = finalUrl.match(/\/explore\/([\w?=&\-.%]+)/) || finalUrl.match(/\/discovery\/item\/([\w?=&\-.%]+)/);
+                    if (idMatch) {
+                        const cleanId = idMatch[1].split('?')[0];
+                        // 依然保留 finalUrl，因为 process 还需要提 xsec_token
+                        finalLink = { platform: name, type: 'explore', id: cleanId, url: finalUrl };
+                    }
+                }
+            } catch (e) { }
+        }
+
+        const key = `${finalLink.type}:${finalLink.id}`;
+        if (!seen.has(key)) {
+            seen.add(key);
+            results.push(finalLink);
+        }
+    }
     return results;
 }
 
@@ -169,28 +183,7 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
 
     let finalUrl = link.url;
 
-    // 步骤二：如果是短链接，获取其跳转后的基础地址
-    if (link.url.includes('xhslink.com')) {
-        logger.debug(`小红书短链接解析：尝试获取 ${link.url} 的最终地址`);
-        try {
-            await ctx.http(link.url, {
-                method: 'GET',
-                headers: {'User-Agent': config.userAgent},
-                redirect: 'manual',
-            });
-        } catch (e: any) {
-            const location = e.response?.headers?.location;
-            if (location) {
-                finalUrl = location;
-                logger.debug(`短链接解析成功，跳转地址: ${finalUrl}`);
-            } else {
-                logger.error(`解析短链接时发生网络错误: ${e.message}`);
-                return null;
-            }
-        }
-    }
-
-    // 步骤三：构建最终要抓取的URL
+    // 步骤二：构建最终要抓取的URL
     let urlToFetch: string;
     try {
         const baseUrl = finalUrl.split('?')[0];
