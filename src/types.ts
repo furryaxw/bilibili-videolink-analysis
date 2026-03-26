@@ -36,6 +36,8 @@ export interface PluginConfig {
     usingLocal: boolean;
     sendFiles: boolean;
     sendLinks: boolean;
+    sendVoice: boolean;
+    sendVoiceOutside: boolean;
 
     // 缓存设置
     enableCache: boolean;

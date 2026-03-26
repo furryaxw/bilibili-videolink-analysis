@@ -345,9 +345,12 @@ async function downloadAndMapUrl(
                 return;
             }
 
-            // 检查内容类型，避免下载非图片内容
-            const contentType = res.headers['content-type'] || '';
-            if (!contentType.startsWith('image/') && !contentType.includes('video/')) {
+            // 检查内容类型，避免下载无关网页或危险文件
+            const contentType = (res.headers['content-type'] || '').toLowerCase();
+            if (!contentType.startsWith('image/') &&
+                !contentType.includes('video/') &&
+                !contentType.includes('audio/') &&
+                !contentType.includes('application/octet-stream')) {
                 req.destroy();
                 reject(new Error(`Unexpected content type: ${contentType}`));
                 return;
@@ -663,10 +666,21 @@ export async function sendResult_plain(
     }
 
     // --- 发送 files 中的所有媒体（video/audio/generic）---
-    if (config.sendFiles && Array.isArray(result.files)) {
+    if (Array.isArray(result.files)) {
         for (const file of result.files) {
             const {type, url: remoteUrl} = file;
             if (!['video', 'audio', 'generic'].includes(type)) continue;
+
+            // 权限分离校验
+            const isVideo = type === 'video';
+            const isAudio = type === 'audio';
+            const isGeneric = type === 'generic';
+
+            const needsFile = config.sendFiles && (isVideo || isGeneric || isAudio);
+            const needsVoice = config.sendVoice && isAudio;
+
+            // 如果两个通道都没开启，直接跳过
+            if (!needsFile && !needsVoice) continue;
 
             let shouldSend = true;
             if (config.Max_size !== undefined) {
@@ -691,7 +705,7 @@ export async function sendResult_plain(
 
             if (shouldSend) {
                 try {
-                    let localUrl = remoteUrl
+                    let localUrl = remoteUrl;
                     if (config.usingLocal) {
                         const t = Date.now();
                         localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
@@ -700,24 +714,23 @@ export async function sendResult_plain(
 
                     if (!localUrl) continue;
 
-                    let element: string | null = null;
-                    if (type === 'video') {
-                        element = h.video(localUrl).toString();
-                    } else if (type === 'audio') {
-                        element = h.audio(localUrl).toString();
-                    } else if (type === 'generic') {
-                        // 注意：标准 OneBot v11 不支持 file，部分实现支持
-                        // 若你环境不支持，可改用文本链接：element = escapeHtml(remoteUrl);
-                        element = h.file(localUrl).toString();
+                    // 1. 发送【文件通道】(如果开启了文件发送)
+                    if (needsFile) {
+                        let fileElement: string | null = null;
+                        if (isVideo) {
+                            fileElement = h.video(localUrl).toString();
+                        } else if (isAudio || isGeneric) {
+                            fileElement = h.file(localUrl).toString(); // 音频和通用文件都用 file 发送
+                        }
+                        if (fileElement) sendPromises.push(session.send(fileElement));
                     }
 
-                    if (element) {
-                        sendPromises.push(session.send(element));
-                        logger.debug(`${type} 直链 (${result.platform}): ${remoteUrl}`);
-                        const size = await getFileSize(remoteUrl, proxy, config.userAgent, logger);
-                        const sizeMB = size ? (size / (1024 * 1024)).toFixed(2) : 'unknown';
-                        logger.debug(`${type} 已发送 (${sizeMB} MB): ${localUrl}`);
+                    // 2. 发送【语音通道】(如果开启了语音发送)
+                    if (needsVoice) {
+                        sendPromises.push(session.send(h.audio(localUrl).toString()));
                     }
+
+                    logger.debug(`${type} 直链处理完毕 (${result.platform}): ${remoteUrl}`);
                 } catch (e) {
                     logger.warn(`${type} 下载/发送失败: ${remoteUrl}`, e);
                 }
@@ -853,10 +866,20 @@ export async function sendResult_forward(
     // --- 处理 files ---
     const extraSendPromises: Promise<any>[] = [];
 
-    if (config.sendFiles && Array.isArray(result.files)) {
+    if (Array.isArray(result.files)) {
         for (const file of result.files) {
             const {type, url: remoteUrl} = file;
             if (!['video', 'audio', 'generic'].includes(type)) continue;
+
+            // 权限分离校验
+            const isVideo = type === 'video';
+            const isAudio = type === 'audio';
+            const isGeneric = type === 'generic';
+
+            const needsFile = config.sendFiles && (isVideo || isGeneric || isAudio);
+            const needsVoice = config.sendVoice && isAudio;
+
+            if (!needsFile && !needsVoice) continue;
 
             let shouldInclude = true;
             if (config.Max_size !== undefined) {
@@ -874,11 +897,7 @@ export async function sendResult_forward(
                         data: {
                             user_id: session.selfId,
                             nickname: '分享助手',
-                            content: {
-                                type: 'text', data: {
-                                    text: `无法获取文件大小，已跳过发送`
-                                }
-                            }
+                            content: { type: 'text', data: { text: `无法获取文件大小，已跳过发送` } }
                         }
                     });
                 } else if (sizeBytes > maxBytes) {
@@ -890,11 +909,7 @@ export async function sendResult_forward(
                         data: {
                             user_id: session.selfId,
                             nickname: '分享助手',
-                            content: {
-                                type: 'text', data: {
-                                    text: `文件大小超限 (${sizeMB} MB > ${maxMB} MB)`
-                                }
-                            }
+                            content: { type: 'text', data: { text: `文件大小超限 (${sizeMB} MB > ${maxMB} MB)` } }
                         }
                     });
                     logger.info(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)，跳过: ${remoteUrl}`);
@@ -911,43 +926,36 @@ export async function sendResult_forward(
                     }
                     if (!localUrl) continue;
 
-                    if (!mixed_sending) {
-                        // 作为转发节点发送
-                        let segment: any = null;
-                        if (type === 'video') {
-                            segment = {type: 'video', data: {file: localUrl}};
-                        } else if (type === 'audio') {
-                            segment = {type: 'audio', data: {file: localUrl}};
-                        } else if (type === 'generic') {
-                            // 注意：标准 OneBot 转发节点不支持 file，这里降级为文本链接
-                            segment = {type: 'text', data: {text: `📄 文件: ${remoteUrl}`}};
-                        }
-
-                        if (segment) {
-                            forwardNodes.push({
-                                type: 'node',
-                                data: {
-                                    user_id: session.selfId,
-                                    nickname: '分享助手',
-                                    content: [segment]
-                                }
-                            });
-                        }
-                    } else {
-                        // 混合模式：独立发送
-                        let element: string | null = null;
-                        if (type === 'video') element = h.video(localUrl).toString();
-                        else if (type === 'audio') element = h.audio(localUrl).toString();
-                        else if (type === 'generic') element = h.file(localUrl).toString();
-
-                        if (element) {
-                            extraSendPromises.push(session.send(element));
+                    // 1. 发送【文件通道】
+                    if (needsFile) {
+                        if (mixed_sending) {
+                            // 混合模式，丢到外侧独立发送
+                            if (isVideo) extraSendPromises.push(session.send(h.video(localUrl).toString()));
+                            else extraSendPromises.push(session.send(h.file(localUrl).toString())); // 音频与文件都发 file
+                        } else {
+                            // 纯转发模式，塞进转发节点内
+                            if (isVideo) {
+                                forwardNodes.push({ type: 'node', data: { user_id: session.selfId, nickname: '分享助手', content: [{ type: 'video', data: { file: localUrl } }] } });
+                            } else {
+                                forwardNodes.push({ type: 'node', data: { user_id: session.selfId, nickname: '分享助手', content: [{ type: 'file', data: { file: localUrl } }] } });
+                            }
                         }
                     }
 
-                    logger.debug(`${type} 直链 (${result.platform}): ${remoteUrl}`);
+                    // 2. 发送【语音通道】
+                    if (needsVoice) {
+                        if (config.sendVoiceOutside || mixed_sending) {
+                            // 在外部独立发语音条
+                            extraSendPromises.push(session.send(h.audio(localUrl).toString()));
+                        } else {
+                            // 塞进合并转发节点内
+                            forwardNodes.push({ type: 'node', data: { user_id: session.selfId, nickname: '分享助手', content: [{ type: 'audio', data: { file: localUrl } }] } });
+                        }
+                    }
+
+                    logger.debug(`${type} 直链处理完毕 (${result.platform}): ${remoteUrl}`);
                 } catch (e) {
-                    logger.warn(`${type} 下载失败: ${remoteUrl}`, e);
+                    logger.warn(`${type} 处理失败: ${remoteUrl}`, e);
                 }
             }
         }

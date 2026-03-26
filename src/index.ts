@@ -39,6 +39,8 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
         ]).default("forward").description("发送模式"),
         usingLocal: Schema.boolean().default(false).description("使用本地文件（关闭后代理设置无效）"),
         sendFiles: Schema.boolean().default(true).description("是否发送文件（视频等）"),
+        sendVoice: Schema.boolean().default(true).description('是否发送额外的语音（音乐解析）'),
+        sendVoiceOutside: Schema.boolean().default(true).description('是否将额外的语音单独发送（仅合并转发模式生效）'),
         sendLinks: Schema.boolean().default(false).description("是否附加直链（仅对合并发送有效）"),
     }).description("基础设置"),
 
@@ -98,7 +100,7 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
         youtube_ApiUrl: Schema.string().role('link').description(
             '外挂 Python 解析服务的 API 地址，需要专用解析服务<br>' +
             '<a href="https://github.com/furryaxw/share-links-analysis/blob/Master/README.md" target="_blank">点击此处查看部署方式</a>'
-        ).default('http://127.0.0.1:12001/api/parse'),
+        ).default('http://127.0.0.1:12001'),
     }).description('YouTube 解析设置'),
 
     Schema.object({
