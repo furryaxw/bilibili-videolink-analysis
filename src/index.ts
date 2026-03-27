@@ -512,6 +512,7 @@ export function apply(ctx: Context, config: PluginConfig) {
             let result: ParsedInfo | null = null;
             const cacheKey = `${link.platform}:${link.id}`;
             let optimisticData: ParsedInfo | null = null; // 用于暂存乐观缓存数据
+            let optimisticTime = 0; // 记录乐观缓存的生成时间
 
             try {
                 // 1. 查持久化缓存 (DB)
@@ -528,11 +529,14 @@ export function apply(ctx: Context, config: PluginConfig) {
 
                         if (!isExpiredL1) {
                             logger.debug(`使用 L1 缓存解析结果: ${cacheKey}`);
-                            result = entry.data;
+                            result = {...entry.data}; // 浅拷贝，避免修改污染原缓存对象
+                            const cacheTimeStr = new Date(entry.created_at).toLocaleString('zh-CN', {hour12: false});
+                            result.mainbody = (result.mainbody || '') + `\n\n[📦 正在使用 L1 缓存 | 缓存时间: ${cacheTimeStr}]`;
                             isCache = true;
                         } else if (config.optimisticCache && !isExpiredL2) {
                             logger.debug(`L1 缓存已过期，暂存乐观缓存备用: ${cacheKey}`);
-                            optimisticData = entry.data;
+                            optimisticData = {...entry.data}; // 浅拷贝备用
+                            optimisticTime = entry.created_at;
                         } else {
                             // 彻底过期，删除
                             await ctx.database.remove('sla_parse_cache', {key: cacheKey});
@@ -547,7 +551,8 @@ export function apply(ctx: Context, config: PluginConfig) {
                         // 如果有相同的任务正在进行，直接等待它的结果
                         try {
                             result = await pendingChecks.get(cacheKey) || null;
-                            if (optimisticData && result === optimisticData) {
+                            // 若合并任务返回的结果带有乐观缓存标记
+                            if (result && (result as any)._isOptimisticFallback) {
                                 isCache = true;
                                 status = "optimistic_fallback";
                             }
@@ -556,6 +561,9 @@ export function apply(ctx: Context, config: PluginConfig) {
                             if (optimisticData) {
                                 logger.warn(`合并任务失败，触发乐观缓存回退: ${cacheKey}`);
                                 result = optimisticData;
+                                const cacheTimeStr = new Date(optimisticTime).toLocaleString('zh-CN', {hour12: false});
+                                result.mainbody = (result.mainbody || '') + `\n\n[⚠️ 并发请求异常，回退 L2 乐观缓存 | 缓存时间: ${cacheTimeStr}]`;
+                                (result as any)._isOptimisticFallback = true;
                                 isCache = true;
                                 status = "optimistic_fallback";
                             } else {
@@ -573,6 +581,9 @@ export function apply(ctx: Context, config: PluginConfig) {
                                 if (!res) {
                                     if (optimisticData) {
                                         logger.warn(`API 返回 null，触发乐观缓存回退: ${cacheKey}`);
+                                        const cacheTimeStr = new Date(optimisticTime).toLocaleString('zh-CN', {hour12: false});
+                                        optimisticData.mainbody = (optimisticData.mainbody || '') + `\n\n[⚠️ 解析数据为空，回退 L2 乐观缓存 | 缓存时间: ${cacheTimeStr}]`;
+                                        (optimisticData as any)._isOptimisticFallback = true;
                                         return optimisticData;
                                     }
                                     return null;
@@ -591,6 +602,9 @@ export function apply(ctx: Context, config: PluginConfig) {
                                 // 抛出异常（网络错误/封禁）时触发乐观回退
                                 if (optimisticData) {
                                     logger.warn(`解析抛出异常，触发乐观缓存回退: ${cacheKey} | Error: ${e.message}`);
+                                    const cacheTimeStr = new Date(optimisticTime).toLocaleString('zh-CN', {hour12: false});
+                                    optimisticData.mainbody = (optimisticData.mainbody || '') + `\n\n[⚠️ 接口触发异常，回退 L2 乐观缓存 | 缓存时间: ${cacheTimeStr}]`;
+                                    (optimisticData as any)._isOptimisticFallback = true;
                                     return optimisticData;
                                 }
                                 logger.warn(`解析任务出错: ${e}`);
@@ -608,7 +622,7 @@ export function apply(ctx: Context, config: PluginConfig) {
                         try {
                             result = await task;
                             // 识别最终是否使用了乐观缓存回退
-                            if (optimisticData && result === optimisticData) {
+                            if (result && (result as any)._isOptimisticFallback) {
                                 isCache = true;
                                 status = "optimistic_fallback";
                             }
@@ -618,7 +632,6 @@ export function apply(ctx: Context, config: PluginConfig) {
                         }
                     }
                 }
-                // === 逻辑结束 ===
 
                 if (result) {
                     lastProcessedUrls[channelId][link.url] = Date.now();
@@ -635,48 +648,59 @@ export function apply(ctx: Context, config: PluginConfig) {
                 errorStack = e.stack || String(e);
                 logger.warn(`处理异常: ${e}`);
             } finally {
-                // 4. 上报数据
+                // 4. 上报针对性排障数据
                 const totalTime = Date.now() - startTotal;
 
-                // 获取内存使用情况 (MB)
-                const memoryUsage = process.memoryUsage();
-                const rssMB = (memoryUsage.rss / 1024 / 1024).toFixed(2);
-
-                // 截取堆栈前 1000 个字符，防止数据包过大（根据您的后端数据库限制调整）
+                // 截取堆栈前 1000 个字符，防止数据包过大
                 const truncatedStack = errorStack.length > 1000 ? errorStack.substring(0, 1000) + "..." : errorStack;
 
+                // 提取结果特征 (不上传庞大的明文，只上传数据维度，用于排查“是否少抓了图片”或“正文是否为空”)
+                const resultFeatures = result ? {
+                    res_title: result.title ? (result.title.length > 50 ? result.title.substring(0, 50) + '...' : result.title) : "无标题",
+                    res_author: result.authorName || "未知",
+                    res_has_cover: !!result.coverUrl,
+                    res_files_count: result.files ? result.files.length : 0,
+                    res_media_types: result.files ? result.files.map(f => f.type).join(',') : "",
+                    res_mainbody_len: result.mainbody ? result.mainbody.length : 0,
+                } : {};
+
                 reportMetric(ctx, config, {
-                    type: "link_process", // 业务类型
+                    type: "link_process_trace", // 标识为详细的单次解析追踪记录
 
-                    // Tags
+                    // === 1. 触发上下文 (精确复现用) ===
                     platform: link.platform,
-                    status: status,
-                    is_cache: isCache.toString(),
-                    using_local: config.usingLocal.toString(),
-                    user_id: session.userId || "unknown",
-
-                    // 上下文信息，帮助定位是哪个群/频道
-                    guild_id: session.guildId || "private",
-                    channel_id: session.channelId || "unknown",
-
-                    // URL
+                    link_type: link.type,       // 例如：opus, video, song, program
+                    link_id: link.id,           // 解析出的资源核心 ID
                     target_url: link.url,
 
-                    // 错误信息
+                    // === 2. 用户与会话上下文 ===
+                    user_id: session.userId || "unknown",
+                    guild_id: session.guildId || "private",
+                    message_id: session.messageId || "unknown", // 用于在日志中溯源特定消息
+                    raw_content_len: session.content ? session.content.length : 0, // 查明是否因长文本混排导致误触
+
+                    // === 3. 执行状态与缓存命中 ===
+                    status: status, // success, failed, error, optimistic_fallback
+                    is_cache: isCache,
+
+                    // === 4. 关键排障配置状态 ===
+                    // 记录当时的运行配置，排查是否是特定模式下才报错（如本地下载+混合发送）
+                    cfg_using_local: config.usingLocal,
+                    cfg_use_forward: config.useForward,
+                    cfg_clarity: config.Video_ClarityPriority,
+
+                    // === 5. 结果体特征 ===
+                    ...resultFeatures,
+
+                    // === 6. 错误追踪 ===
                     error_msg: errorMsg,
-                    // 建议将堆栈放入 tags (如果数据库支持长文本) 或者单独的 log 字段
-                    // 这里放入 tags 供查阅
                     error_stack: status === 'error' ? truncatedStack : "",
 
-                    // 数值/指标
+                    // === 7. 耗时拆解 (性能瓶颈定位) ===
                     time_total_ms: totalTime,
-                    time_parse_ms: parseTime,
-                    time_download_ms: timeStats.downloadTime,
-                    time_send_ms: timeStats.sendTime,
-
-                    // 系统负载指标
-                    memory_rss_mb: parseFloat(rssMB), // 当前进程内存占用
-                    concurrent_tasks: pendingChecks.size, // 当前正在进行的并发解析数
+                    time_parse_ms: parseTime,                   // 解析器发请求拉取数据的耗时
+                    time_download_ms: timeStats.downloadTime,   // 代理下载图片/视频的耗时
+                    time_send_ms: timeStats.sendTime,           // 组装并推给 QQ/Bot 平台的耗时
                 });
             }
         }
