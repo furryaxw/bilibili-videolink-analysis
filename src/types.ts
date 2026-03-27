@@ -43,6 +43,8 @@ export interface PluginConfig {
     enableCache: boolean;
     cacheExpiration: number; // 缓存过期时间（小时）
     autoCleanInterval: number; // 自动清理间隔（小时）
+    optimisticCache: boolean; // 是否开启乐观缓存
+    optimisticExpiration: number; // 乐观缓存过期时间（小时）
 
     // 格式化配置
     format: string; // 主格式化模板

@@ -22,18 +22,18 @@ export async function init(ctx: Context, config: PluginConfig) {
 
 const linkRules = [
     {
-        // 匹配 songDetail/xxx
-        pattern: /songDetail\/([A-Za-z0-9]+)/gi,
+        // 匹配 songDetail 链接
+        pattern: /(?:https?:\/\/)?(?:[a-zA-Z0-9-]+\.)+qq\.com\/\S*?songDetail\/([A-Za-z0-9]+)/gi,
         type: "song" as const,
     },
     {
-        // 匹配 songmid=xxx
-        pattern: /songmid=([A-Za-z0-9]+)/gi,
+        // 匹配 songmid 参数链接
+        pattern: /(?:https?:\/\/)?(?:[a-zA-Z0-9-]+\.)+qq\.com\/\S*?songmid=([A-Za-z0-9]+)/gi,
         type: "song" as const,
     },
     {
-        // 匹配 QQ 音乐客户端生成的短链 (例如 c.y.qq.com)
-        pattern: /(?:https?:\/\/)?c\.y\.qq\.com\/base\/fcgi-bin\/u\?__=[a-zA-Z0-9]+/gi,
+        // 匹配 QQ 音乐客户端生成的短链 (例如 c.y.qq.com, c6.y.qq.com)
+        pattern: /(?:https?:\/\/)?[a-zA-Z0-9-]+\.y\.qq\.com\/base\/fcgi-bin\/u\?__=[a-zA-Z0-9]+/gi,
         type: "short" as const,
     }
 ];
@@ -133,20 +133,27 @@ export async function process(
         logger.debug(`正在请求 QQ 音乐解析: ${songmid}`);
         const apiUrl = "https://u.y.qq.com/cgi-bin/musicu.fcg?format=json";
 
+        // 判断传入的是否是纯数字（song_id）
+        const isNumeric = /^\d+$/.test(songmid);
+
         // ================= 1. 聚合 RPC 载荷 =================
-        const aggregatePayload = {
+        const aggregatePayload: any = {
             comm: {ct: 24, cv: 0},
             songinfo: {
                 module: "music.pf_song_detail_svr",
                 method: "get_song_detail_yqq",
-                param: {song_mid: songmid}
+                param: isNumeric ? { song_id: parseInt(songmid) } : { song_mid: songmid }
             },
             fav: {
                 module: "music.musicasset.SongFavRead",
                 method: "CgiGetSongFav",
-                param: {v_songMid: [songmid]}
-            },
-            vkey: {
+                param: isNumeric ? { v_songId: [parseInt(songmid)] } : { v_songMid: [songmid] }
+            }
+        };
+
+        // 如果是纯数字，第一步不能请求 vkey（因为没有 mid），如果是字符串则正常一并请求
+        if (!isNumeric) {
+            aggregatePayload.vkey = {
                 module: "vkey.GetVkeyServer",
                 method: "CgiGetVkey",
                 param: {
@@ -181,9 +188,15 @@ export async function process(
 
         // ================= 3. 提取基础信息与统计 =================
         const track = aggRes.songinfo.data.track_info;
-        const extraInfo = aggRes.songinfo.data.info;
 
-        const title = track.name || '未知歌曲';
+        if (!track || !track.name || !track.mid) {
+            throw new Error("获取到的歌曲信息为空（该歌曲可能已下架、无版权或受风控限制）");
+        }
+
+        const extraInfo = aggRes.songinfo.data.info;
+        const realSongMid = track.mid;
+
+        const title = track.name;
         const artist = track.singer?.map((s: any) => s.name).join(' / ') || '未知歌手';
         const albumMid = track.album?.mid;
         const albumName = track.album?.name || '未知专辑';
@@ -232,7 +245,7 @@ export async function process(
                     method: "CgiGetVkey",
                     param: {
                         guid: currentGuid,
-                        songmid: [songmid],
+                        songmid: [realSongMid],
                         songtype: [0],
                         uin: "0",
                         loginflag: 1,

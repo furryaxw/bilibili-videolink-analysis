@@ -46,7 +46,9 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
 
     Schema.object({
         enableCache: Schema.boolean().default(true).description("开启缓存（包括解析结果缓存和资源文件缓存）"),
-        cacheExpiration: Schema.number().default(24).description("缓存过期时间（小时）。设置为 0 则不过期。"),
+        cacheExpiration: Schema.number().default(24).description("L1 缓存过期时间（小时）。设为 0 则不过期。"),
+        optimisticCache: Schema.boolean().default(true).description("开启乐观缓存"),
+        optimisticExpiration: Schema.number().default(240).description("乐观缓存最大保留时间（小时）。设为 0 则不过期。"),
         autoCleanInterval: Schema.number().default(1).description("自动清理过期缓存的检查间隔（小时）。"),
     }).description("缓存设置"),
 
@@ -186,9 +188,27 @@ export function apply(ctx: Context, config: PluginConfig) {
 
     // 清理缓存函数
     const cleanExpiredCache = async () => {
-        if (!config.enableCache || config.cacheExpiration <= 0) return;
+        if (!config.enableCache) return;
         const now = Date.now();
-        const threshold = now - config.cacheExpiration * 60 * 60 * 1000;
+
+        let maxExpiration = 0;
+
+        if (config.optimisticCache) {
+            // 如果开启了乐观缓存，且 L1 或 L2 中有任何一个设为 0（永不过期），则直接跳过定时清理
+            if (config.cacheExpiration === 0 || config.optimisticExpiration === 0) {
+                return;
+            }
+            // 只有两者都不为 0 时，才取它们的最大值作为物理清理时间
+            maxExpiration = Math.max(config.cacheExpiration, config.optimisticExpiration);
+        } else {
+            // 如果没开启乐观缓存，且 L1 设为 0（永不过期），直接跳过
+            if (config.cacheExpiration === 0) {
+                return;
+            }
+            maxExpiration = config.cacheExpiration;
+        }
+
+        const threshold = now - maxExpiration * 60 * 60 * 1000;
 
         // 清理解析缓存
         await ctx.database.remove('sla_parse_cache', {
@@ -344,12 +364,12 @@ export function apply(ctx: Context, config: PluginConfig) {
                                 platform: parser.name,
                                 cookie: cookie
                             }]);
-                            return { name: parser.name, success: true };
+                            return {name: parser.name, success: true};
                         }
                         // 获取为空，不做任何操作（保留数据库旧值）
-                        return { name: parser.name, success: false, reason: 'Empty' };
+                        return {name: parser.name, success: false, reason: 'Empty'};
                     } catch (e: any) {
-                        return { name: parser.name, success: false, reason: e.message };
+                        return {name: parser.name, success: false, reason: e.message};
                     }
                 }));
 
@@ -491,22 +511,30 @@ export function apply(ctx: Context, config: PluginConfig) {
             // === 缓存与并发控制逻辑 ===
             let result: ParsedInfo | null = null;
             const cacheKey = `${link.platform}:${link.id}`;
+            let optimisticData: ParsedInfo | null = null; // 用于暂存乐观缓存数据
 
             try {
                 // 1. 查持久化缓存 (DB)
                 if (config.enableCache) {
                     const cached = await ctx.database.get('sla_parse_cache', cacheKey);
-                    // 检查是否存在且未过期
+                    // 检查是否存在
                     if (cached.length > 0) {
                         const entry = cached[0];
-                        const isExpired = config.cacheExpiration > 0 && (Date.now() - entry.created_at > config.cacheExpiration * 60 * 60 * 1000);
+                        const ageMs = Date.now() - entry.created_at;
 
-                        if (!isExpired) {
-                            logger.debug(`使用缓存解析结果: ${cacheKey}`);
+                        // 分别判断是否超过 L1 和 乐观缓存 时效
+                        const isExpiredL1 = config.cacheExpiration > 0 && (ageMs > config.cacheExpiration * 60 * 60 * 1000);
+                        const isExpiredL2 = config.optimisticExpiration > 0 && (ageMs > config.optimisticExpiration * 60 * 60 * 1000);
+
+                        if (!isExpiredL1) {
+                            logger.debug(`使用 L1 缓存解析结果: ${cacheKey}`);
                             result = entry.data;
                             isCache = true;
+                        } else if (config.optimisticCache && !isExpiredL2) {
+                            logger.debug(`L1 缓存已过期，暂存乐观缓存备用: ${cacheKey}`);
+                            optimisticData = entry.data;
                         } else {
-                            // 过期删除
+                            // 彻底过期，删除
                             await ctx.database.remove('sla_parse_cache', {key: cacheKey});
                         }
                     }
@@ -519,9 +547,20 @@ export function apply(ctx: Context, config: PluginConfig) {
                         // 如果有相同的任务正在进行，直接等待它的结果
                         try {
                             result = await pendingChecks.get(cacheKey) || null;
+                            if (optimisticData && result === optimisticData) {
+                                isCache = true;
+                                status = "optimistic_fallback";
+                            }
                         } catch (e: any) {
-                            // 如果等待的任务失败了，这里也会捕获到
-                            throw e;
+                            // 其他合并请求抛错时触发回退
+                            if (optimisticData) {
+                                logger.warn(`合并任务失败，触发乐观缓存回退: ${cacheKey}`);
+                                result = optimisticData;
+                                isCache = true;
+                                status = "optimistic_fallback";
+                            } else {
+                                throw e;
+                            }
                         }
                     } else {
                         // 如果没有，创建一个新的 Promise 任务
@@ -530,8 +569,17 @@ export function apply(ctx: Context, config: PluginConfig) {
                             try {
                                 const res = await processLink(ctx, config, link, session);
 
-                                // 解析成功且开启缓存，则写入 DB
-                                if (res && config.enableCache) {
+                                // 判断是否视为解析失败（返回 null）
+                                if (!res) {
+                                    if (optimisticData) {
+                                        logger.warn(`API 返回 null，触发乐观缓存回退: ${cacheKey}`);
+                                        return optimisticData;
+                                    }
+                                    return null;
+                                }
+
+                                // 解析成功且开启缓存，则写入 DB，刷新缓存时间戳
+                                if (config.enableCache) {
                                     await ctx.database.upsert('sla_parse_cache', [{
                                         key: cacheKey,
                                         data: res,
@@ -540,6 +588,11 @@ export function apply(ctx: Context, config: PluginConfig) {
                                 }
                                 return res;
                             } catch (e: any) {
+                                // 抛出异常（网络错误/封禁）时触发乐观回退
+                                if (optimisticData) {
+                                    logger.warn(`解析抛出异常，触发乐观缓存回退: ${cacheKey} | Error: ${e.message}`);
+                                    return optimisticData;
+                                }
                                 logger.warn(`解析任务出错: ${e}`);
                                 throw e;
                             } finally {
@@ -554,6 +607,11 @@ export function apply(ctx: Context, config: PluginConfig) {
 
                         try {
                             result = await task;
+                            // 识别最终是否使用了乐观缓存回退
+                            if (optimisticData && result === optimisticData) {
+                                isCache = true;
+                                status = "optimistic_fallback";
+                            }
                         } finally {
                             // 无论成功失败，任务结束后从 Map 中移除
                             pendingChecks.delete(cacheKey);
