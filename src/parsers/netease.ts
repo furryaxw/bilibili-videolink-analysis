@@ -2,7 +2,7 @@
 
 import {Context, Session} from 'koishi';
 import {Link, ParsedInfo, PluginConfig} from '../types';
-import {escapeHtml, numeral} from '../utils';
+import {escapeHtml, expandShortLink, numeral} from '../utils';
 
 export const name = "netease";
 
@@ -33,21 +33,27 @@ export async function match(content: string, ctx: Context, config: PluginConfig)
         while ((m = rule.pattern.exec(content)) !== null) {
             const id = rule.type === 'short' ? m[0] : m[1];
             const url = rule.type === 'short' ? m[0] : `https://music.163.com/song?id=${id}`;
-            initialLinks.push({ platform: name, type: rule.type, id, url });
+            initialLinks.push({platform: name, type: rule.type, id, url});
         }
     }
+
+    const logger = ctx.logger(`share-links-analysis:${name}`);
+    const proxy = config.proxy_settings[name] ? config.proxy : undefined;
 
     for (const link of initialLinks) {
         let finalLink = link;
         if (link.type === 'short') {
-            try {
-                const res = await ctx.http('HEAD', link.url, { redirect: 'follow', headers: { 'User-Agent': config.userAgent } });
-                const finalUrl = res.url || link.url;
-                const idMatch = finalUrl.match(/id=(\d+)/);
-                if (idMatch) {
-                    finalLink = { platform: name, type: 'song', id: idMatch[1], url: `https://music.163.com/song?id=${idMatch[1]}` };
-                }
-            } catch (e) { }
+            const finalUrl = await expandShortLink(ctx, link.url, config, logger, proxy);
+
+            const idMatch = finalUrl.match(/id=(\d+)/);
+            if (idMatch) {
+                finalLink = {
+                    platform: name,
+                    type: 'song',
+                    id: idMatch[1],
+                    url: `https://music.163.com/song?id=${idMatch[1]}`
+                };
+            }
         }
 
         const key = `${finalLink.type}:${finalLink.id}`;

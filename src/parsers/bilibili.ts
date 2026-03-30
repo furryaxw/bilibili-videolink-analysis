@@ -2,7 +2,7 @@
 
 import {Context, h, Session} from 'koishi';
 import {BilibiliVideoInfo, FileInfo, Link, ParsedInfo, PluginConfig} from '../types';
-import {escapeHtml, getCookie, numeral} from '../utils';
+import {escapeHtml, expandShortLink, getCookie, numeral} from '../utils';
 import crypto from 'crypto';
 
 export const name = "bilibili";
@@ -198,62 +198,54 @@ export async function match(content: string, ctx: Context, config: PluginConfig)
     // 内部帮助函数：运行正则提取
     function extractLinks(text: string): Link[] {
         const extracted: Link[] = [];
-        for (const { pattern, type } of linkRules) {
+        for (const {pattern, type} of linkRules) {
             let m;
             pattern.lastIndex = 0;
             while ((m = pattern.exec(text)) !== null) {
                 let id = m[1];
                 if (!id) continue;
                 if (type === 'video' && id.toLowerCase().startsWith('av')) {
-                    try { id = avToBv(id); } catch (e) { }
+                    try {
+                        id = avToBv(id);
+                    } catch (e) {
+                    }
                 }
                 let url = m[0];
                 if (type === 'video') url = `https://www.bilibili.com/video/${id}`;
                 else if (type !== 'short' && !url.startsWith('http')) url = `https://${url}`;
-                extracted.push({ platform: name, type, id, url });
+                extracted.push({platform: name, type, id, url});
             }
         }
         let bvMatch;
         bvPattern.lastIndex = 0;
         while ((bvMatch = bvPattern.exec(text)) !== null) {
-            extracted.push({ platform: name, type: 'video', id: bvMatch[1], url: `https://www.bilibili.com/video/${bvMatch[1]}` });
+            extracted.push({
+                platform: name,
+                type: 'video',
+                id: bvMatch[1],
+                url: `https://www.bilibili.com/video/${bvMatch[1]}`
+            });
         }
         return extracted;
     }
 
     const initialLinks = extractLinks(content);
 
+    const logger = ctx.logger(`share-links-analysis:${name}`);
+    const proxy = config.proxy_settings[name] ? config.proxy : undefined;
+
     for (const link of initialLinks) {
         let finalLink = link;
 
         if (link.type === 'short') {
-            let finalUrl = '';
-            try {
-                const response = await ctx.http(link.url, { method: 'GET', headers: { 'User-Agent': config.userAgent }, redirect: 'manual' });
-                finalUrl = response.headers.get('location') || '';
-            } catch (e: any) {
-                finalUrl = e.response?.headers?.location || '';
-            }
-
-            if ((!finalUrl || finalUrl.includes('b23.tv')) && ctx.puppeteer) {
-                let page = null;
-                try {
-                    page = await ctx.puppeteer.page();
-                    await page.setUserAgent(config.userAgent);
-                    await page.goto(link.url, { waitUntil: 'domcontentloaded' });
-                    finalUrl = page.url();
-                } catch (e: any) { } finally {
-                    if (page) await page.close();
-                }
-            }
+            const finalUrl = await expandShortLink(ctx, link.url, config, logger, proxy);
 
             if (finalUrl && !finalUrl.includes('b23.tv')) {
                 const resolvedLinks = extractLinks(finalUrl);
-                if (resolvedLinks.length > 0) finalLink = resolvedLinks[0]; // 替换为真实的视频/动态对象
+                if (resolvedLinks.length > 0) finalLink = resolvedLinks[0]; // 替换为视频/动态对象
             }
         }
 
-        // 使用 [类型+ID] 强力去重
         const key = `${finalLink.type}:${finalLink.id}`;
         if (!seen.has(key)) {
             seen.add(key);
@@ -578,16 +570,20 @@ async function processOpus(ctx: Context, config: PluginConfig, link: Link, logge
 
                 if (oMajor.type === 'MAJOR_TYPE_OPUS' && oMajor.opus) {
                     origDesc = oMajor.opus.summary?.text || origDesc;
-                    oMajor.opus.pics?.forEach((p: any) => { if (p.url) origImages.push(p.url); });
+                    oMajor.opus.pics?.forEach((p: any) => {
+                        if (p.url) origImages.push(p.url);
+                    });
                     origJumpUrl = oMajor.opus.jump_url;
                 } else if (oMajor.type === 'MAJOR_TYPE_DRAW' && oMajor.draw) {
-                    oMajor.draw.items?.forEach((i: any) => { if (i.src) origImages.push(i.src); });
+                    oMajor.draw.items?.forEach((i: any) => {
+                        if (i.src) origImages.push(i.src);
+                    });
                     origJumpUrl = oMajor.draw.jump_url;
                 } else if (oMajor.type === 'MAJOR_TYPE_ARTICLE' && oMajor.article) {
                     origTitle = oMajor.article.title || '';
                     origDesc = oMajor.article.desc || origDesc;
                     if (oMajor.article.covers && oMajor.article.covers.length > 0) {
-                        origCover = oMajor.article.covers[ 0 ];
+                        origCover = oMajor.article.covers[0];
                     }
                     origJumpUrl = oMajor.article.jump_url;
                 } else if (oMajor.type === 'MAJOR_TYPE_ARCHIVE' && oMajor.archive) {

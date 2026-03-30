@@ -2,7 +2,7 @@
 
 import {Context, h, Session} from 'koishi';
 import {FileInfo, Link, ParsedInfo, PluginConfig} from '../types';
-import {escapeHtml, getEffectiveSettings, numeral} from '../utils';
+import {escapeHtml, expandShortLink, getEffectiveSettings, numeral} from '../utils';
 
 export const name = "twitter";
 
@@ -31,22 +31,22 @@ export async function match(content: string, ctx: Context, config: PluginConfig)
         while ((m = rule.pattern.exec(content)) !== null) {
             const id = m[2] || m[1];
             const url = rule.type === 'short' ? `https://t.co/${id}` : `https://x.com/${m[1]}/status/${id}`;
-            initialLinks.push({ platform: name, type: rule.type, id, url });
+            initialLinks.push({platform: name, type: rule.type, id, url});
         }
     }
 
+    const logger = ctx.logger(`share-links-analysis:${name}`);
+    const proxy = config.proxy_settings[name] ? config.proxy : undefined;
+
     for (const link of initialLinks) {
         let finalLink = link;
+
         if (link.type === 'short') {
-            try {
-                const reqOptions: any = { redirect: 'follow' };
-                if (config.proxy) reqOptions.proxyAgent = config.proxy;
-                const res = await ctx.http('HEAD', link.url, reqOptions);
-                const match = /status\/(\d+)/.exec(res.url);
-                if (match) {
-                    finalLink = { platform: name, type: 'tweet', id: match[1], url: `https://x.com/i/status/${match[1]}` };
-                }
-            } catch (e) { }
+            const finalUrl = await expandShortLink(ctx, link.url, config, logger, proxy);
+            const match = /status\/(\d+)/.exec(finalUrl);
+            if (match) {
+                finalLink = {platform: name, type: 'tweet', id: match[1], url: `https://x.com/i/status/${match[1]}`};
+            }
         }
 
         const key = `${finalLink.type}:${finalLink.id}`;

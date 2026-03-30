@@ -133,7 +133,7 @@ async function reportMetric(ctx: Context, config: PluginConfig, payload: Record<
 
     const data = {
         app: "share_links_analysis", // 必填 app 标识
-        timestamp: Math.floor(Date.now() / 1000), // 可选时间戳
+        timestamp: Date.now(),
         ...payload
     };
 

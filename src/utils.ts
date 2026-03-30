@@ -190,6 +190,114 @@ export async function getCookie(
 }
 
 /**
+ * 短链展开函数
+ * @param ctx Koishi Context
+ * @param shortUrl 需要展开的短链
+ * @param config 插件配置
+ * @param logger Logger 实例
+ * @param proxy 动态传入的代理地址
+ * @param cookie 动态传入的平台身份票据
+ * @returns 展开后的真实链接 (如果解析失败则尽力返回原链接)
+ */
+export async function expandShortLink(
+    ctx: Context,
+    shortUrl: string,
+    config: PluginConfig,
+    logger: Logger,
+    proxy?: string,
+    cookie?: string
+): Promise<string> {
+    let finalUrl = shortUrl;
+
+    // 封装安全的获取 Location 方法，规避 TypeScript 对 Headers 的类型校验报错
+    const getLocation = (headers: any): string | null => {
+        if (!headers) return null;
+        if (typeof headers.get === 'function') {
+            return headers.get('location') || headers.get('Location') || null;
+        }
+        return headers['location'] || headers['Location'] || null;
+    };
+
+    try {
+        const reqOptions: any = {
+            method: 'GET',
+            // 弃用强制 manual，让 HTTP 客户端自然跟随，我们抓其尾巴
+            headers: {
+                'User-Agent': config.userAgent,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
+            }
+        };
+
+        if (proxy) reqOptions.proxyAgent = proxy;
+        if (cookie) reqOptions.headers['Cookie'] = cookie;
+        const response = await ctx.http(shortUrl, reqOptions);
+
+        // 策略 1: Fetch 标准重定向
+        if (response.url && response.url !== shortUrl) {
+            finalUrl = response.url;
+        }
+        // 策略 2: Axios 底层重定向
+        else if ((response as any)?.request?.res?.responseUrl && (response as any).request.res.responseUrl !== shortUrl) {
+            finalUrl = (response as any).request.res.responseUrl;
+        }
+        // 策略 3: 手动拦截 3xx Location
+        else if (response.status >= 300 && response.status < 400) {
+            const location = getLocation(response.headers);
+            if (location) finalUrl = location;
+        }
+        // 策略 4: 前端防爬重定向探测
+        else if (response.data && typeof response.data === 'string') {
+            const html = response.data;
+            const metaRefreshMatch = html.match(/<meta[^>]+http-equiv=["']?refresh["']?[^>]+content=["']?\d+;\s*url=([^"'>]+)["']?/i);
+
+            if (metaRefreshMatch && metaRefreshMatch[1]) {
+                finalUrl = metaRefreshMatch[1].replace(/&amp;/g, '&');
+            } else {
+                const jsRedirectMatch = html.match(/window\.location\.(?:replace|href)\s*=\s*["']([^"']+)["']/i);
+                if (jsRedirectMatch && jsRedirectMatch[1]) {
+                    finalUrl = jsRedirectMatch[1].replace(/&amp;/g, '&');
+                }
+            }
+        }
+
+    } catch (e: any) {
+        // 发生网络异常或 4xx/5xx 时，保留 Error 级日志以供排查
+        logger.error(`[Expand] 请求异常 ${shortUrl}: ${e.message}`);
+
+        if (e.response) {
+            const location = getLocation(e.response.headers);
+            if (location) {
+                finalUrl = location;
+                logger.debug(`[Expand] 触发抢救，从异常 Header Location 中提取到终点: ${finalUrl}`);
+            } else if (e.response.url && e.response.url !== shortUrl) {
+                finalUrl = e.response.url;
+                logger.debug(`[Expand] 触发抢救，从异常 response.url 中提取到终点: ${finalUrl}`);
+            }
+        }
+    }
+
+    // 处理跨域重定向可能带来的相对路径灾难
+    if (finalUrl.startsWith('/')) {
+        try {
+            const urlObj = new URL(shortUrl);
+            finalUrl = `${urlObj.protocol}//${urlObj.host}${finalUrl}`;
+        } catch (err) {
+            logger.error(`[Expand] 相对路径绝对化补全失败: ${err}`);
+        }
+    }
+
+    // 只在最终结果处输出一条 Debug 日志比对变化
+    if (finalUrl !== shortUrl) {
+        logger.debug(`[Expand] 展开成功: ${shortUrl} -> ${finalUrl}`);
+    } else {
+        logger.debug(`[Expand] 展开失败或无需展开，保持原样: ${shortUrl}`);
+    }
+
+    return finalUrl;
+}
+
+/**
  * 将数字格式化为易读的字符串（如 万、亿）
  * @param num 数字
  * @param config 插件配置
@@ -897,7 +1005,7 @@ export async function sendResult_forward(
                         data: {
                             user_id: session.selfId,
                             nickname: '分享助手',
-                            content: { type: 'text', data: { text: `无法获取文件大小，已跳过发送` } }
+                            content: {type: 'text', data: {text: `无法获取文件大小，已跳过发送`}}
                         }
                     });
                 } else if (sizeBytes > maxBytes) {
@@ -909,7 +1017,7 @@ export async function sendResult_forward(
                         data: {
                             user_id: session.selfId,
                             nickname: '分享助手',
-                            content: { type: 'text', data: { text: `文件大小超限 (${sizeMB} MB > ${maxMB} MB)` } }
+                            content: {type: 'text', data: {text: `文件大小超限 (${sizeMB} MB > ${maxMB} MB)`}}
                         }
                     });
                     logger.info(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)，跳过: ${remoteUrl}`);
@@ -935,9 +1043,23 @@ export async function sendResult_forward(
                         } else {
                             // 纯转发模式，塞进转发节点内
                             if (isVideo) {
-                                forwardNodes.push({ type: 'node', data: { user_id: session.selfId, nickname: '分享助手', content: [{ type: 'video', data: { file: localUrl } }] } });
+                                forwardNodes.push({
+                                    type: 'node',
+                                    data: {
+                                        user_id: session.selfId,
+                                        nickname: '分享助手',
+                                        content: [{type: 'video', data: {file: localUrl}}]
+                                    }
+                                });
                             } else {
-                                forwardNodes.push({ type: 'node', data: { user_id: session.selfId, nickname: '分享助手', content: [{ type: 'file', data: { file: localUrl } }] } });
+                                forwardNodes.push({
+                                    type: 'node',
+                                    data: {
+                                        user_id: session.selfId,
+                                        nickname: '分享助手',
+                                        content: [{type: 'file', data: {file: localUrl}}]
+                                    }
+                                });
                             }
                         }
                     }
@@ -949,7 +1071,14 @@ export async function sendResult_forward(
                             extraSendPromises.push(session.send(h.audio(localUrl).toString()));
                         } else {
                             // 塞进合并转发节点内
-                            forwardNodes.push({ type: 'node', data: { user_id: session.selfId, nickname: '分享助手', content: [{ type: 'audio', data: { file: localUrl } }] } });
+                            forwardNodes.push({
+                                type: 'node',
+                                data: {
+                                    user_id: session.selfId,
+                                    nickname: '分享助手',
+                                    content: [{type: 'audio', data: {file: localUrl}}]
+                                }
+                            });
                         }
                     }
 

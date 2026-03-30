@@ -2,7 +2,7 @@
 
 import {Context, Session} from 'koishi';
 import {Link, ParsedInfo, PluginConfig} from '../types';
-import {escapeHtml, getCookie, numeral} from '../utils';
+import {escapeHtml, expandShortLink, getCookie, numeral} from '../utils';
 
 export const name = "qqmusic";
 
@@ -64,37 +64,31 @@ export async function match(content: string, ctx: Context, config: PluginConfig)
         }
     }
 
+    const logger = ctx.logger(`share-links-analysis:${name}`);
+    const proxy = config.proxy_settings[name] ? config.proxy : undefined;
+
     // 2. 短链还原及去重
     for (const link of initialLinks) {
         let finalLink = link;
+
         if (link.type === 'short') {
-            try {
-                // 探测短链跳转地址
-                const res = await ctx.http('GET', link.url, {
-                    redirect: 'follow',
-                    headers: {'User-Agent': config.userAgent}
-                });
-                const finalUrl = res.url || link.url;
+            const finalUrl = await expandShortLink(ctx, link.url, config, logger, proxy);
 
-                // 尝试从跳转后的长链中提取 songmid
-                let idMatch = /songDetail\/([A-Za-z0-9]+)/.exec(finalUrl);
-                if (!idMatch) idMatch = /songmid=([A-Za-z0-9]+)/.exec(finalUrl);
+            // 尝试从跳转后的长链中提取 songmid
+            let idMatch = /songDetail\/([A-Za-z0-9]+)/.exec(finalUrl);
+            if (!idMatch) idMatch = /songmid=([A-Za-z0-9]+)/.exec(finalUrl);
 
-                if (idMatch) {
-                    finalLink = {
-                        platform: name,
-                        type: 'song',
-                        id: idMatch[1],
-                        url: `https://y.qq.com/n/ryqq/songDetail/${idMatch[1]}`
-                    };
-                }
-            } catch (e) {
-                // 如果解析失败则忽略，交由后续流程或直接抛弃
+            if (idMatch) {
+                finalLink = {
+                    platform: name,
+                    type: 'song',
+                    id: idMatch[1],
+                    url: `https://y.qq.com/n/ryqq/songDetail/${idMatch[1]}`
+                };
             }
         }
 
         const key = `${finalLink.type}:${finalLink.id}`;
-        // 只有成功提取到了 songmid (非短链类型) 才推入 results
         if (!seen.has(key) && finalLink.type !== 'short') {
             seen.add(key);
             results.push(finalLink);
@@ -142,12 +136,12 @@ export async function process(
             songinfo: {
                 module: "music.pf_song_detail_svr",
                 method: "get_song_detail_yqq",
-                param: isNumeric ? { song_id: parseInt(songmid) } : { song_mid: songmid }
+                param: isNumeric ? {song_id: parseInt(songmid)} : {song_mid: songmid}
             },
             fav: {
                 module: "music.musicasset.SongFavRead",
                 method: "CgiGetSongFav",
-                param: isNumeric ? { v_songId: [parseInt(songmid)] } : { v_songMid: [songmid] }
+                param: isNumeric ? {v_songId: [parseInt(songmid)]} : {v_songMid: [songmid]}
             }
         };
 
@@ -165,7 +159,8 @@ export async function process(
                     platform: "20"
                 }
             }
-        };
+        }
+
 
         const commentUrl = `https://c.y.qq.com/base/fcgi-bin/fcg_global_comment_h5.fcg?biztype=1&topid=${songmid}&cmd=8&pagenum=0&pagesize=1&format=json`;
 

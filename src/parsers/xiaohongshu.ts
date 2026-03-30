@@ -5,7 +5,7 @@ import {FileInfo, Link, ParsedInfo, PluginConfig, XhsInitialState} from '../type
 // @ts-ignore
 import {Cookie, Page} from 'puppeteer';
 import {load} from 'cheerio';
-import {escapeHtml, getCookie, numeral} from '../utils';
+import {escapeHtml, getCookie, numeral, expandShortLink} from '../utils';
 
 export const name = "xiaohongshu";
 
@@ -32,39 +32,38 @@ export async function match(content: string, ctx: Context, config: PluginConfig)
     const seen = new Set<string>();
     const initialLinks: Link[] = [];
 
-    for (const { pattern, type } of linkRules) {
+    for (const {pattern, type} of linkRules) {
         let m;
         pattern.lastIndex = 0;
         while ((m = pattern.exec(content)) !== null) {
             const idPart = m[1];
             if (!idPart) continue;
             const cleanId = idPart.split('?')[0];
-            const host = type === "short" ? "xhslink.com" : "www.xiaohongshu.com";
-            const pathPrefix = type === "short" ? (idPart.startsWith('m/') ? 'm/' : '') : (type === "discovery" ? "discovery/item/" : "explore/");
-            initialLinks.push({ platform: name, type, id: cleanId, url: `https://${host}/${pathPrefix}${idPart}` });
+            let url = m[0];
+            if (!url.startsWith('http')) {
+                url = `https://${url}`;
+            }
+            initialLinks.push({platform: name, type, id: cleanId, url});
         }
     }
 
+    const logger = ctx.logger(`share-links-analysis:${name}`);
+    const proxy = config.proxy_settings[name] ? config.proxy : undefined;
+
     for (const link of initialLinks) {
         let finalLink = link;
-        if (link.type === 'short') {
-            try {
-                let finalUrl = '';
-                try {
-                    await ctx.http(link.url, { method: 'GET', headers: { 'User-Agent': config.userAgent }, redirect: 'manual' });
-                } catch (e: any) {
-                    finalUrl = e.response?.headers?.location || '';
-                }
 
-                if (finalUrl) {
-                    const idMatch = finalUrl.match(/\/explore\/([\w?=&\-.%]+)/) || finalUrl.match(/\/discovery\/item\/([\w?=&\-.%]+)/);
-                    if (idMatch) {
-                        const cleanId = idMatch[1].split('?')[0];
-                        // 依然保留 finalUrl，因为 process 还需要提 xsec_token
-                        finalLink = { platform: name, type: 'explore', id: cleanId, url: finalUrl };
-                    }
+        if (link.type === 'short') {
+            const finalUrl = await expandShortLink(ctx, link.url, config, logger, proxy);
+
+            if (finalUrl) {
+                const idMatch = finalUrl.match(/\/explore\/([\w?=&\-.%]+)/) || finalUrl.match(/\/discovery\/item\/([\w?=&\-.%]+)/);
+                if (idMatch) {
+                    const cleanId = idMatch[1].split('?')[0];
+                    // 依然保留 finalUrl，因为 process 还需要提 xsec_token
+                    finalLink = {platform: name, type: 'explore', id: cleanId, url: finalUrl};
                 }
-            } catch (e) { }
+            }
         }
 
         const key = `${finalLink.type}:${finalLink.id}`;
