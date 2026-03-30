@@ -426,11 +426,11 @@ async function downloadAndMapUrl(
         return fileUrl;
     }
 
-    return new Promise((resolve, reject) => {
+    const attemptDownload = (): Promise<string> => new Promise((resolve, reject) => {
         const agent = getProxyAgent(proxy, url);
-        const headers = {
+        const headers: any = {
             'User-Agent': userAgent,
-            'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+            'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8,video/*,audio/*',
             'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
             'Connection': 'keep-alive'
         };
@@ -441,9 +441,7 @@ async function downloadAndMapUrl(
             if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                 req.destroy();
                 logger.debug(`重定向: ${url} -> ${res.headers.location}`);
-                downloadAndMapUrl(ctx, res.headers.location, proxy, userAgent, localDownloadDir, onebotReadDir, logger, enableCache)
-                    .then(resolve)
-                    .catch(reject);
+                resolve(downloadAndMapUrl(ctx, res.headers.location, proxy, userAgent, localDownloadDir, onebotReadDir, logger, enableCache));
                 return;
             }
 
@@ -499,6 +497,22 @@ async function downloadAndMapUrl(
             reject(new Error('Request timeout'));
         });
     });
+
+    // --- 引入带延迟递增的指数退避重试 ---
+    const MAX_RETRIES = 3;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+            return await attemptDownload();
+        } catch (err: any) {
+            if (attempt === MAX_RETRIES) {
+                throw err; // 最后一次耗尽，抛出彻底失败
+            }
+            logger.warn(`[文件下载] 第 ${attempt} 次尝试失败 (${err.message})，等待重试... URL: ${url}`);
+            await new Promise(r => setTimeout(r, 2000 * attempt)); // 等待 2s, 4s 后重试
+        }
+    }
+
+    throw new Error("Download completely failed after retries.");
 }
 
 export async function getFileSize(url: string, proxy: string | undefined, userAgent: string | undefined, logger: Logger): Promise<number | null> {
@@ -662,7 +676,7 @@ export async function sendResult(
     config: PluginConfig,
     result: ParsedInfo,
     logger: Logger,
-    statsRef: { downloadTime: number, sendTime: number } // 新增参数
+    statsRef: { downloadTime: number, sendTime: number, errors: string[] }
 ): Promise<void> {
     if (!session.channel) {
         await sendResult_plain(ctx, session, config, result, logger, statsRef);
@@ -681,14 +695,13 @@ export async function sendResult(
     }
 }
 
-// 2. 修改 sendResult_plain
 export async function sendResult_plain(
     ctx: Context,
     session: Session,
     config: PluginConfig,
     result: ParsedInfo,
     logger: Logger,
-    statsRef: { downloadTime: number, sendTime: number }
+    statsRef: { downloadTime: number, sendTime: number, errors: string[] }
 ): Promise<void> {
     logger.debug('进入普通发送');
 
@@ -711,8 +724,9 @@ export async function sendResult_plain(
             try {
                 mediaCoverUrl = await downloadAndMapUrl(ctx, result.coverUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
                 logger.debug(`封面已下载: ${mediaCoverUrl}`);
-            } catch (e) {
+            } catch (e: any) {
                 logger.warn(`封面下载失败: ${result.coverUrl}`, e);
+                statsRef.errors.push(`[Cover] ${e.message}`);
                 mediaCoverUrl = result.coverUrl;
             }
             statsRef.downloadTime += Date.now() - t; // 累加耗时
@@ -735,8 +749,9 @@ export async function sendResult_plain(
                         const localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
                         urlMap[remoteUrl] = localUrl;
                         logger.debug(`正文图片已下载: ${localUrl}`);
-                    } catch (e) {
+                    } catch (e: any) {
                         logger.warn(`正文图片下载失败: ${remoteUrl}`, e);
+                        statsRef.errors.push(`[Mainbody Image] ${e.message}`);
                     }
                 } else {
                     urlMap[remoteUrl] = remoteUrl
@@ -839,15 +854,26 @@ export async function sendResult_plain(
                     }
 
                     logger.debug(`${type} 直链处理完毕 (${result.platform}): ${remoteUrl}`);
-                } catch (e) {
+                } catch (e: any) {
                     logger.warn(`${type} 下载/发送失败: ${remoteUrl}`, e);
+                    statsRef.errors.push(`[File ${type}] ${e.message}`);
                 }
             }
         }
     }
 
+    const wrappedSendPromises = sendPromises.map(p =>
+        p.catch((e: any) => {
+            const errorMsg = e.message || String(e);
+            if (errorMsg.includes('Timeout')) {
+                logger.warn(`普通发送请求触发超时，已作放行处理屏蔽此报错。`);
+                return Promise.resolve();
+            }
+            throw e;
+        })
+    );
     const tSend = Date.now(); // 发送计时开始
-    await Promise.all(sendPromises);
+    await Promise.all(wrappedSendPromises);
     statsRef.sendTime = Date.now() - tSend; // 计算发送耗时
 }
 
@@ -858,7 +884,7 @@ export async function sendResult_forward(
     result: ParsedInfo,
     logger: Logger,
     mixed_sending = false,
-    statsRef: { downloadTime: number, sendTime: number } // 接收引用
+    statsRef: { downloadTime: number, sendTime: number, errors: string[] }
 ): Promise<void> {
     logger.debug(mixed_sending ? '进入混合发送' : '进入合并发送');
 
@@ -880,8 +906,9 @@ export async function sendResult_forward(
             const t = Date.now();
             try {
                 mediaCoverUrl = await downloadAndMapUrl(ctx, result.coverUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
-            } catch (e) {
+            } catch (e: any) {
                 logger.warn('封面下载失败', e);
+                statsRef.errors.push(`[Cover] ${e.message}`);
                 mediaCoverUrl = '';
             }
             statsRef.downloadTime += Date.now() - t;
@@ -903,8 +930,9 @@ export async function sendResult_forward(
                         if (!urlMap[url]) {
                             urlMap[url] = await downloadAndMapUrl(ctx, url, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
                         }
-                    } catch (e) {
+                    } catch (e: any) {
                         logger.warn(`正文图片下载失败: ${url}`, e);
+                        statsRef.errors.push(`[Mainbody Image] ${e.message}`);
                     }
                     statsRef.downloadTime += Date.now() - t;
                 } else {
@@ -1083,8 +1111,9 @@ export async function sendResult_forward(
                     }
 
                     logger.debug(`${type} 直链处理完毕 (${result.platform}): ${remoteUrl}`);
-                } catch (e) {
+                } catch (e: any) {
                     logger.warn(`${type} 处理失败: ${remoteUrl}`, e);
+                    statsRef.errors.push(`[File ${type}] ${e.message}`);
                 }
             }
         }
@@ -1114,19 +1143,38 @@ export async function sendResult_forward(
     const promises: Promise<any>[] = [];
 
     if (forwardNodes.length > 0) {
-        promises.push(session.onebot._request('send_group_forward_msg', {
+        const forwardPromise = session.onebot._request('send_group_forward_msg', {
             group_id: session.guildId,
             messages: forwardNodes,
             news: [{text: mediaMainbody || '-'}, {text: '点击查看详情 | Powered by furryaxw'}],
             prompt: result.title || '',
             summary: '分享解析',
             source: result.title || ''
-        }));
+        }).catch((e: any) => {
+            const errorMsg = e.message || String(e);
+            if (errorMsg.includes('Timeout') && errorMsg.includes('send_group_forward_msg')) {
+                logger.warn(`合并转发请求触发超时，已作放行处理屏蔽此报错。`);
+                return Promise.resolve();
+            }
+            throw e;
+        });
+
+        promises.push(forwardPromise);
     }
 
     // 混合模式额外消息
     if (mixed_sending && extraSendPromises.length > 0) {
-        promises.push(...extraSendPromises);
+        const wrappedExtraPromises = extraSendPromises.map(p =>
+            p.catch(e => {
+                const errorMsg = e.message || String(e);
+                if (errorMsg.includes('Timeout')) {
+                    logger.warn(`混合发送请求触发超时，已作放行处理屏蔽此报错。`);
+                    return Promise.resolve();
+                }
+                throw e;
+            })
+        );
+        promises.push(...wrappedExtraPromises);
     }
 
     if (promises.length > 0) {

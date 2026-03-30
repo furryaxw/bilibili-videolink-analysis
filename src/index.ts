@@ -501,7 +501,7 @@ export function apply(ctx: Context, config: PluginConfig) {
 
             // === 性能统计变量 ===
             const startTotal = Date.now();
-            const timeStats = {downloadTime: 0, sendTime: 0};
+            const sendStats: { downloadTime: number, sendTime: number, errors: string[] } = {downloadTime: 0, sendTime: 0, errors: []};
             let parseTime = 0;
             let isCache = false;
             let status = "success";
@@ -635,7 +635,7 @@ export function apply(ctx: Context, config: PluginConfig) {
 
                 if (result) {
                     lastProcessedUrls[channelId][link.url] = Date.now();
-                    await sendResult(ctx, session, config, result, logger, timeStats);
+                    await sendResult(ctx, session, config, result, logger, sendStats);
                 } else {
                     status = "failed";
                     errorMsg = "parser_returned_null";
@@ -653,6 +653,11 @@ export function apply(ctx: Context, config: PluginConfig) {
 
                 // 截取堆栈前 1000 个字符，防止数据包过大
                 const truncatedStack = errorStack.length > 1000 ? errorStack.substring(0, 1000) + "..." : errorStack;
+
+                if (status === "success" && sendStats.errors.length > 0) {
+                    status = "partial_success";
+                    errorMsg = sendStats.errors.join(' | ');
+                }
 
                 // 提取结果特征 (不上传庞大的明文，只上传数据维度，用于排查“是否少抓了图片”或“正文是否为空”)
                 const resultFeatures = result ? {
@@ -699,8 +704,8 @@ export function apply(ctx: Context, config: PluginConfig) {
                     // === 7. 耗时拆解 (性能瓶颈定位) ===
                     time_total_ms: totalTime,
                     time_parse_ms: parseTime,                   // 解析器发请求拉取数据的耗时
-                    time_download_ms: timeStats.downloadTime,   // 代理下载图片/视频的耗时
-                    time_send_ms: timeStats.sendTime,           // 组装并推给 QQ/Bot 平台的耗时
+                    time_download_ms: sendStats.downloadTime,   // 代理下载图片/视频的耗时
+                    time_send_ms: sendStats.sendTime,           // 组装并推给 QQ/Bot 平台的耗时
                 });
             }
         }
