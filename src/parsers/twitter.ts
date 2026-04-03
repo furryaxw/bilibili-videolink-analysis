@@ -295,14 +295,13 @@ async function handleSyndicationFallback(
         const coverUrl = main.cover;
 
         // 解析引用推文
-        if (data.quoted_tweet) {
-            const quoteData = data.quoted_tweet;
+        const quoteData = data.quoted_tweet;
+        if (quoteData) {
             const quoteId = quoteData.id_str || quoteData.tweet_id || "unknown";
             const quote = extractTweetContent(quoteData, config);
-
             const processedQuoteText = await processTweetText(ctx, quote.text, quoteId, quoteData, config);
 
-            mainbody += `\n----------\n[引用 @${quote.screenName}]: ${processedQuoteText}`;
+            mainbody += `\n----------\n[引用 @${quote.screenName}]: ${escapeHtml(processedQuoteText)}`;
             if (quote.images.length > 0) {
                 mainbody += '\n' + quote.images.map(img => h.image(img).toString()).join('\n');
             }
@@ -382,11 +381,12 @@ export async function process(
         const coverUrl = main.cover;
 
         // 解析引用推文
-        if (data.quoted_tweet) {
-            const quoteId = data.quoted_tweet.id_str || data.quoted_tweet.tweet_id || "unknown";
-            const quote = extractVxContent(data.quoted_tweet);
-
-            const processedQuoteText = await processTweetText(ctx, quote.text, quoteId, data.quoted_tweet, config);
+        let quoteData = data.qrt
+        if (quoteData) {
+            // 兼容各种返回结构中的 ID 字段
+            const quoteId = quoteData.tweetID || quoteData.tweet_id || "unknown";
+            const quote = extractVxContent(quoteData);
+            const processedQuoteText = await processTweetText(ctx, quote.text, quoteId, quoteData, config);
 
             mainbody += `\n----------\n[引用 @${quote.screenName}]: ${escapeHtml(processedQuoteText)}`;
             if (quote.images.length > 0) {
