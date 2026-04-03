@@ -9,6 +9,7 @@ import * as Xiaoheihe from './parsers/xiaoheihe';
 import * as Youtube from './parsers/youtube';
 import * as Netease from './parsers/netease';
 import * as QQMusic from './parsers/qqmusic';
+import * as Kugou from './parsers/kugou'
 import * as Github from './parsers/github';
 
 // 定义一个接口来描述你的 Parser 模块结构
@@ -23,7 +24,7 @@ interface ParserModule {
 
 // 强制将数组识别为 ParserModule 列表
 // 这样如果某个模块忘了导出 name，IDE 这里直接就会报错提醒你，非常安全
-export const parsers: ParserModule[] = [Bilibili, Xiaohongshu, Twitter, Xiaoheihe, Youtube, Netease, QQMusic, Github];
+export const parsers: ParserModule[] = [Bilibili, Xiaohongshu, Twitter, Xiaoheihe, Youtube, Netease, QQMusic, Kugou, Github];
 export const parsers_str = parsers.map(p => p.name);
 
 /**
