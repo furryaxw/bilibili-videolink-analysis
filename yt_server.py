@@ -70,17 +70,32 @@ app = FastAPI(lifespan=lifespan)
 class ParseRequest(BaseModel):
     url: str
     clarity_priority: str = "1"  # "1"低画质优先, "2"高画质优先
+    max_size: float = 20.0       # 接收前端传来的最大文件限制 (默认 20MB)
 
 
 @app.post("/api/parse")
 async def parse_youtube(req: ParseRequest, request: Request):
+    # 将前端传来的大小预留一点点安全冗余空间（比如 95%），防止由于约算导致最终超限
+    safe_size = int(req.max_size * 0.95)
+
     if req.clarity_priority == "2":
-        # 高画质优先：寻找原生包含音视频的最高画质 MP4 (通常最高为 720p)
-        format_selection = "best[ext=mp4]/best"
+        # 【核心改进：高画质智能上限】
+        # 优先级 1：寻找有确切文件大小(filesize)且小于限制的最高画质 MP4
+        # 优先级 2：寻找有预估文件大小(filesize_approx)且小于限制的最高画质 MP4
+        # 优先级 3：如果 YouTube 根本没返回大小数据，兜底最高到 720p（规避大体积）
+        # 优先级 4：终极兜底 best
+        format_selection = (
+            f"best[ext=mp4][filesize<{safe_size}M]/"
+            f"best[ext=mp4][filesize_approx<{safe_size}M]/"
+            f"best[ext=mp4][height<=720]/"
+            f"best"
+        )
     else:
-        # 低画质优先：限制最高不超过 480p 的预封装 MP4，兼顾节省带宽与基本可看性
-        # 如果没有 480p 及其以下的，则回退到最差的画质兜底
-        format_selection = "best[height<=480][ext=mp4]/worst[ext=mp4]/worst"
+        # 低画质优先：同样加入大小限制，并在最后兜底 worst
+        format_selection = (
+            f"best[ext=mp4][height<=480][filesize<{safe_size}M]/"
+            f"worst[ext=mp4]/worst"
+        )
 
     ydl_opts = {
         "proxy": proxy,

@@ -2,7 +2,7 @@
 
 import {Context, h, Session} from 'koishi';
 import {ContentBlock, Link, ParsedInfo, PluginConfig, XiaoHeiHePostData} from '../types';
-import {escapeHtml, numeral} from '../utils';
+import {escapeHtml, getCookie, numeral} from '../utils';
 // @ts-ignore
 import {HTTPRequest, Page} from 'puppeteer'
 
@@ -57,6 +57,24 @@ export async function process(
         page = await ctx.puppeteer.page();
         await page.setUserAgent(config.userAgent)
 
+        // 加载并注入 Cookie
+        const cookieStr = await getCookie(ctx, config, name);
+        if (cookieStr) {
+            // Puppeteer 需要对象数组格式的 Cookie
+            const cookies = cookieStr.split(';').map(pair => {
+                const [cookieName, ...cookieValue] = pair.trim().split('=');
+                return {
+                    name: cookieName,
+                    value: cookieValue.join('='),
+                    domain: '.xiaoheihe.cn' // 必须指定正确的 domain
+                };
+            }).filter(c => c.name); // 过滤空值
+
+            if (cookies.length > 0) {
+                await page.setCookie(...cookies);
+            }
+        }
+
         // 设置请求拦截（阻止非必要资源加载加速解析）
         await page.setRequestInterception(true)
         page.on('request', (req: HTTPRequest) => {
@@ -94,11 +112,23 @@ export async function process(
             throw new Error(`页面加载失败，状态码: ${response?.status() || '未知'}`)
         }
 
-        // 智能等待 - 适配两种布局
+        // 智能等待 - 适配三种布局
         await Promise.race([
             page.waitForFunction(() => {
-                return document.querySelector('.hb-bbs-image-text') ||
-                    document.querySelector('.hb-bbs-post');
+                const hasImageText = !!document.querySelector('.hb-bbs-image-text');
+                const hasPost = !!document.querySelector('.hb-bbs-post');
+
+                const videoBox = document.querySelector('.hb-bbs__video');
+                let isVideoReady = false;
+                if (videoBox) {
+                    const v = videoBox.querySelector('video') as HTMLVideoElement;
+                    // 只要 video 标签有了 src，或者它内部长出了带有 src 的 source 标签，就判定为就绪
+                    if (v && (v.src || v.querySelector('source')?.getAttribute('src'))) {
+                        isVideoReady = true;
+                    }
+                }
+
+                return hasImageText || hasPost || isVideoReady;
             }, {timeout: 30000}),
             new Promise((_, reject) =>
                 setTimeout(() => reject(new Error('核心内容容器未找到')), 30000)
@@ -110,8 +140,9 @@ export async function process(
             // 1. 检测页面类型
             const isImageTextType = !!document.querySelector('.hb-bbs-image-text');
             const isPostType = !!document.querySelector('.hb-bbs-post');
+            const isVideoBbsType = !!document.querySelector('.hb-bbs__video');
 
-            if (!isImageTextType && !isPostType) {
+            if (!isImageTextType && !isPostType && !isVideoBbsType) {
                 throw new Error('不支持的页面结构');
             }
 
@@ -125,6 +156,7 @@ export async function process(
             const contentBlocks: ContentBlock[] = [];
             let authorSection: Element | null = null;
             let coverImage = '';
+            let videoUrl = '';
 
             // 3. 操作数据解析（通用）
             let likeCount = '0';
@@ -139,12 +171,15 @@ export async function process(
                     const countSpan = button.querySelector('.link-reply__operation-desc');
                     const count = countSpan?.textContent?.trim() || '0';
 
-                    if (icon?.classList.contains('heybox-bbs_thumbs-up')) {
-                        likeCount = count;
-                    } else if (icon?.classList.contains('heybox-common_star')) {
-                        favoriteCount = count;
-                    } else if (icon?.classList.contains('heybox-bbs_comment')) {
-                        commentCount = count;
+                    if (icon) {
+                        const className = icon.className || '';
+                        if (className.includes('thumbs-up')) {
+                            likeCount = count;
+                        } else if (className.includes('star')) {
+                            favoriteCount = count;
+                        } else if (className.includes('comment')) {
+                            commentCount = count;
+                        }
                     }
                 });
             }
@@ -250,6 +285,43 @@ export async function process(
                         }
                     });
                 }
+            } else if (isVideoBbsType) {
+                // ===== 纯视频贴结构解析 (.hb-bbs__video) =====
+                const container = document.querySelector('.hb-bbs__video')!;
+
+                // 提取视频节点与封面
+                const videoEl = container.querySelector('video') as HTMLVideoElement;
+                if (videoEl) {
+                    videoUrl = videoEl.currentSrc || videoEl.src || videoEl.querySelector('source')?.getAttribute('src') || videoEl.getAttribute('src') || '';
+                    coverImage = videoEl.getAttribute('poster') || '';
+                }
+
+                // 正文描述 (纯视频贴通常没有单独的 title，把这段描述作为内容)
+                const contentWrapper = container.querySelector('.bbs-video__content-wrapper');
+                if (contentWrapper) {
+                    title = contentWrapper.textContent?.trim() || '分享视频';
+                    contentBlocks.push({type: 'text', content: title});
+                }
+
+                // 作者信息
+                authorSection = container.querySelector('.link-section-user');
+                if (authorSection) {
+                    username = authorSection.querySelector('.link-user__username')?.textContent?.trim() || '未知用户';
+                    level = authorSection.querySelector('.level-tag__wrapper')?.textContent?.trim() || 'Lv.0';
+                }
+
+                // 独立的时间与地区信息
+                const dataSection = container.querySelector('.link-section-link-data');
+                if (dataSection) {
+                    time = dataSection.querySelector('.link-data__time')?.textContent?.trim() || '未知时间';
+                    ip = dataSection.querySelector('.link-data__ip')?.textContent?.trim() || '未知地区';
+                }
+
+                // 标签
+                container.querySelectorAll('.link-section-tags .content-tag-text').forEach(tag => {
+                    const text = tag.textContent?.trim();
+                    if (text) tags.push(text);
+                });
             }
 
             return {
@@ -266,7 +338,8 @@ export async function process(
                 likeCount,
                 favoriteCount,
                 commentCount,
-                coverImage
+                coverImage,
+                videoUrl
             };
         });
 
@@ -297,9 +370,9 @@ export async function process(
             authorName: postData.username,
             mainbody: mainbody + tag,
             sourceUrl: link.url,
-            stats: postData.isImageTextType ? status : "",
+            stats: status,
             coverUrl: postData.coverImage,
-            files: []
+            files: postData.videoUrl ? [{ type: 'video', url: postData.videoUrl }] : []
         };
     } catch (error) {
         logger.error('解析失败:', error)

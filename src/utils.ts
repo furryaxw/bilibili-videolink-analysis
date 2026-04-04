@@ -22,7 +22,10 @@ const PLATFORM_DOMAINS = {
     'xiaohongshu': ['xiaohongshu.com'],
     'bilibili': ['bilibili.com'],
     'qqmusic': ['qq.com', 'y.qq.com'],
-    'netease': ['163.com', 'music.163.com']
+    'netease': ['163.com', 'music.163.com'],
+    'xiaoheihe': ['xiaoheihe.cn', 'max-c.com'],
+    'kugou': ['kugou.com'],
+    'github': ['github.com']
 };
 
 /**
@@ -1143,7 +1146,7 @@ export async function sendResult_forward(
     const promises: Promise<any>[] = [];
 
     if (forwardNodes.length > 0) {
-        const forwardPromise = session.onebot._request('send_group_forward_msg', {
+        const forwardPromise = session.onebot._request('send_forward_msg', {
             group_id: session.guildId,
             messages: forwardNodes,
             news: [{text: mediaMainbody || '-'}, {text: '点击查看详情 | Powered by furryaxw'}],
@@ -1152,7 +1155,7 @@ export async function sendResult_forward(
             source: result.title || ''
         }).catch((e: any) => {
             const errorMsg = e.message || String(e);
-            if (errorMsg.includes('Timeout') && errorMsg.includes('send_group_forward_msg')) {
+            if (errorMsg.includes('Timeout') && errorMsg.includes('send_forward_msg')) {
                 logger.warn(`合并转发请求触发超时，已作放行处理屏蔽此报错。`);
                 return Promise.resolve();
             }

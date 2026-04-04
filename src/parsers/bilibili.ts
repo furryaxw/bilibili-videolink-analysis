@@ -328,12 +328,32 @@ async function processVideo(ctx: Context, config: PluginConfig, link: Link, logg
         // 获取视频流直链
         let videoUrl: string | null = null;
         try {
-            const qn = config.Video_ClarityPriority === '1' ? 32 : 80;
-            // 直接调用本地集成的无登录视频流请求
-            const videoStream = await getVideoStream(ctx, data.aid, data.bvid, data.pages[0].cid, qn, config);
+            // 定义画质梯队。如果开启高画质，依次尝试 80(1080p) -> 64(720p) -> 32(480p) -> 16(360p)
+            const qnList = config.Video_ClarityPriority === '2' ? [80, 64, 32, 16] : [32, 16];
+            const maxBytes = config.Max_size * 1024 * 1024;
 
-            if (videoStream?.data?.durl?.[0]?.url) {
-                videoUrl = videoStream.data.durl[0].url;
+            for (const qn of qnList) {
+                // 调用原生接口
+                const videoStream = await getVideoStream(ctx, data.aid, data.bvid, data.pages[0].cid, qn, config);
+                const durl = videoStream?.data?.durl?.[0];
+
+                if (durl && durl.url) {
+                    // B站接口会返回精确的文件大小 size
+                    if (durl.size && durl.size <= maxBytes) {
+                        videoUrl = durl.url;
+                        logger.debug(`成功匹配合适清晰度 qn=${qn}，体积: ${(durl.size/1024/1024).toFixed(2)}MB`);
+                        break; // 满足限制，跳出循环
+                    } else if (qn === qnList[qnList.length - 1]) {
+                        // 如果已经是能给的最低画质却依然超限，只能交出去，让 utils.ts 去拦截并输出“超限提示”
+                        videoUrl = durl.url;
+                        logger.warn(`B站视频即便降至最低画质 qn=${qn} 仍超限，交由底层拦截。`);
+                    } else {
+                        // 超限但还有降级空间
+                        logger.debug(`当前画质 qn=${qn} 超限 (${(durl.size/1024/1024).toFixed(2)}MB > ${config.Max_size}MB)，正在降级...`);
+                    }
+                } else {
+                    break; // 接口异常，直接退出
+                }
             }
         } catch (e: any) {
             logger.error(`获取视频流失败: ${e.message}`);

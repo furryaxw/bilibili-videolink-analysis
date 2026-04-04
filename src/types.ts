@@ -236,4 +236,5 @@ export interface XiaoHeiHePostData {
     favoriteCount: string;
     commentCount: string;
     coverImage: string;
+    videoUrl?: string;
 }

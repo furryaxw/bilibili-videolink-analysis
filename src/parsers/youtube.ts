@@ -61,7 +61,8 @@ export async function process(
         // 发送 POST 请求给 Python 服务
         const response = await ctx.http.post(`${apiUrl}/api/parse`, {
             url: videoUrl,
-            clarity_priority: config.Video_ClarityPriority
+            clarity_priority: config.Video_ClarityPriority,
+            max_size: config.Max_size
         }, {
             timeout: 30000
         });
