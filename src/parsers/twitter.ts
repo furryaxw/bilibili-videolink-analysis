@@ -8,11 +8,11 @@ export const name = "twitter";
 
 const linkRules = [
     {
-        pattern: /https?:\/\/(?:www\.)?(?:twitter\.com|x\.com|mobile\.twitter\.com)\/([\w-]+)\/status\/(\d+)/gi,
+        pattern: /https?:\/\/(?:www\.)?(?:twitter\.com|x\.com|mobile\.twitter\.com)\/[a-zA-Z0-9_]+\/status\/(\d+)\b/gi,
         type: "tweet" as const,
     },
     {
-        pattern: /https?:\/\/t\.co\/([a-zA-Z0-9]+)/gi,
+        pattern: /https?:\/\/t\.co\/([a-zA-Z0-9]+)\b/gi,
         type: "short" as const,
     }
 ];

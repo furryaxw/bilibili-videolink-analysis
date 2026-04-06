@@ -9,22 +9,22 @@ export const name = "kugou";
 const linkRules = [
     {
         // 匹配网页版/移动版常规链接中明文携带的 hash
-        pattern: /(?:https?:\/\/)?(?:www\.|m\.)?kugou\.com\/.*[?&#]hash=([a-fA-F0-9]{32})/gi,
+        pattern: /(?:https?:\/\/)?(?:www\.|m\.)?kugou\.com\/[^"'\s]*?[?&#]hash=([a-fA-F0-9]{32})\b/gi,
         type: "song" as const,
     },
     {
         // 匹配 mixsong 链接
-        pattern: /(?:https?:\/\/)?(?:www\.|m\.)?kugou\.com\/mixsong\/\w+\.html/gi,
+        pattern: /(?:https?:\/\/)?(?:www\.|m\.)?kugou\.com\/mixsong\/[a-zA-Z0-9_]+\.html\b/gi,
         type: "mixsong" as const,
     },
     {
         // 匹配 share 链接
-        pattern: /(?:https?:\/\/)?(?:www\.|m\.)?kugou\.com\/share\/\w+\.html/gi,
+        pattern: /(?:https?:\/\/)?(?:www\.|m\.)?kugou\.com\/share\/[a-zA-Z0-9_]+\.html\b/gi,
         type: "share" as const,
     },
     {
-        // 匹配酷狗常见的纯短链 (如 t1.kugou.com/..., k.kugou.com/...)
-        pattern: /(?:https?:\/\/)?(?:t\d\.|k\.)kugou\.com\/\w+/gi,
+        // 匹配酷狗纯短链
+        pattern: /(?:https?:\/\/)?(?:t\d\.|k\.)kugou\.com\/[a-zA-Z0-9_]+\b/gi,
         type: "short" as const,
     }
 ];

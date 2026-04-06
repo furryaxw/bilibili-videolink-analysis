@@ -10,11 +10,11 @@ export const name = "xiaoheihe";
 
 const linkRules = [
     {
-        pattern: /https?:\/\/api.xiaoheihe\.cn\/v3\/bbs\/app\/api\/web\/share\?[\w=&]+/gi,
+        pattern: /https?:\/\/api\.xiaoheihe\.cn\/v3\/bbs\/app\/api\/web\/share\?[^"'\s]*?\blink_id=(\d+)/gi,
         type: "bbs_api" as const,
     },
     {
-        pattern: /https?:\/\/www.xiaoheihe\.cn\/app\/bbs\/link\/\w+/gi,
+        pattern: /https?:\/\/www\.xiaoheihe\.cn\/app\/bbs\/link\/(\d+)/gi,
         type: "bbs" as const,
     }
 ];
@@ -27,11 +27,7 @@ export async function match(content: string, ctx: Context, config: PluginConfig)
         let match;
         rule.pattern.lastIndex = 0;
         while ((match = rule.pattern.exec(content)) !== null) {
-            const fullUrl = match[0];
-            let id: string | undefined;
-            if (rule.type == "bbs") id = fullUrl.match(/\w+$/)?.[0];
-            else if (rule.type == "bbs_api") id = fullUrl.match(/link_id=\w+/gi)?.[0].slice(8);
-
+            const id = match[1];
             if (id) {
                 const key = `${rule.type}:${id}`;
                 if (seen.has(key)) continue;

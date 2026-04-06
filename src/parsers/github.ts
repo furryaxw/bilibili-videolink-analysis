@@ -6,6 +6,13 @@ import {escapeHtml, numeral} from '../utils';
 
 export const name = "github";
 
+const linkRules = [
+    {
+        pattern: /(?:https?:\/\/)?(?:www\.)?github\.com\/([a-zA-Z0-9-]+\/[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)*)(?=[.,;!?)]|\s|$)/gi,
+        type: "repo" as const,
+    }
+];
+
 // 过滤掉 GitHub 官方的一些非仓库根路径
 const IGNORE_OWNERS = [
     'settings', 'pulls', 'issues', 'search', 'notifications',
@@ -21,20 +28,25 @@ export async function match(content: string, ctx: Context, config: PluginConfig)
     const results: Link[] = [];
     const seen = new Set<string>();
 
-    // 匹配 github.com/owner/repo
-    const repoPattern = /(?:https?:\/\/)?(?:www\.)?github\.com\/([a-zA-Z0-9-]+)\/([a-zA-Z0-9_.-]+)/gi;
-    let m;
+    for (const rule of linkRules) {
+        let m;
+        rule.pattern.lastIndex = 0;
+        while ((m = rule.pattern.exec(content)) !== null) {
+            const id = m[1];
+            const [owner] = id.split('/');
+            if (owner && IGNORE_OWNERS.includes(owner.toLowerCase())) {
+                continue;
+            }
 
-    while ((m = repoPattern.exec(content)) !== null) {
-        const owner = m[1];
-        const repo = m[2];
-
-        if (IGNORE_OWNERS.includes(owner.toLowerCase())) continue;
-
-        const id = `${owner}/${repo}`;
-        if (!seen.has(id)) {
-            seen.add(id);
-            results.push({platform: name, type: 'repo', id, url: `https://github.com/${id}`});
+            if (!seen.has(id)) {
+                seen.add(id);
+                results.push({
+                    platform: name,
+                    type: rule.type,
+                    id: id,
+                    url: `https://github.com/${id}`
+                });
+            }
         }
     }
 

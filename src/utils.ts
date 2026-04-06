@@ -28,6 +28,12 @@ const PLATFORM_DOMAINS = {
     'github': ['github.com']
 };
 
+export function buildTelemetryEndpoint(baseUrl: string, path: string): string {
+    if (!baseUrl) return '';
+    const cleanBase = baseUrl.replace(/\/+$/, '');
+    return `${cleanBase}${path}`;
+}
+
 /**
  * OpenSSL EVP_BytesToKey 实现
  */
@@ -825,7 +831,7 @@ export async function sendResult_plain(
                     const sizeMB = (sizeBytes / (1024 * 1024)).toFixed(2);
                     const maxMB = config.Max_size.toFixed(2);
                     sendPromises.push(session.send(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)`));
-                    logger.info(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)，跳过: ${remoteUrl}`);
+                    logger.debug(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)，跳过: ${remoteUrl}`);
                 }
             }
 
@@ -900,7 +906,7 @@ export async function sendResult_forward(
     let proxy = undefined;
     if (config.proxy_settings[result.platform as keyof typeof config.proxy_settings]) {
         proxy = config.proxy;
-        logger.info("正在使用代理");
+        logger.debug("正在使用代理");
     }
 
     // --- 封面 ---
@@ -1051,7 +1057,7 @@ export async function sendResult_forward(
                             content: {type: 'text', data: {text: `文件大小超限 (${sizeMB} MB > ${maxMB} MB)`}}
                         }
                     });
-                    logger.info(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)，跳过: ${remoteUrl}`);
+                    logger.debug(`文件大小超限 (${sizeMB} MB > ${maxMB} MB)，跳过: ${remoteUrl}`);
                 }
             }
 

@@ -35,16 +35,16 @@ export interface PluginConfig {
     useForward: 'plain' | 'forward' | 'mixed';
     usingLocal: boolean;
     sendFiles: boolean;
-    sendLinks: boolean;
     sendVoice: boolean;
     sendVoiceOutside: boolean;
+    sendLinks: boolean;
 
     // 缓存设置
     enableCache: boolean;
     cacheExpiration: number; // 缓存过期时间（小时）
-    autoCleanInterval: number; // 自动清理间隔（小时）
     optimisticCache: boolean; // 是否开启乐观缓存
     optimisticExpiration: number; // 乐观缓存过期时间（小时）
+    autoCleanInterval: number; // 自动清理间隔（小时）
 
     // 格式化配置
     format: string; // 主格式化模板
@@ -82,9 +82,9 @@ export interface PluginConfig {
     userAgent: string;
     debug: boolean;
 
-    // 性能监控设置
-    reportEnabled: boolean;
-    reportUrl: string;
+    // 遥测设置
+    enableTelemetry: boolean;
+    telemetryApiUrl: string;
 }
 
 // Bilibili API 返回的视频信息类型定义 (部分)

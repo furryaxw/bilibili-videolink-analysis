@@ -9,7 +9,7 @@ export const name = "youtube";
 // 匹配规则
 const linkRules = [
     {
-        pattern: /https?:\/\/(?:www\.|m\.)?youtube\.com\/watch\?v=([\w-]{11})/gi,
+        pattern: /https?:\/\/(?:www\.|m\.)?youtube\.com\/watch\?[^"'\s]*?\bv=([\w-]{11})/gi,
         type: "video" as const,
     },
     {

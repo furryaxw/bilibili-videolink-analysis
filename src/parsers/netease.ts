@@ -9,11 +9,11 @@ export const name = "netease";
 // 匹配分享出来的网易云音乐单曲链接
 const linkRules = [
     {
-        pattern: /(?:https?:\/\/)?(?:y\.|m\.)?music\.163\.com\/(?:m\/)?(?:#\/)?song\?id=(\d+)/gi,
+        pattern: /(?:https?:\/\/)?(?:[a-zA-Z0-9-]+\.)*music\.163\.com\/(?:m\/)?(?:#\/)?(?:song|song\/media\/outer\/url)\?[^"'\s]*?\bid=(\d+)/gi,
         type: "song" as const,
     },
     {
-        pattern: /(?:https?:\/\/)?(?:y\.|m\.)?music\.163\.com\/(?:m\/)?(?:#\/)?program\?id=(\d+)/gi,
+        pattern: /(?:https?:\/\/)?(?:[a-zA-Z0-9-]+\.)*music\.163\.com\/(?:m\/)?(?:#\/)?program\?[^"'\s]*?\bid=(\d+)/gi,
         type: "program" as const,
     },
     {
@@ -45,7 +45,7 @@ export async function match(content: string, ctx: Context, config: PluginConfig)
         if (link.type === 'short') {
             const finalUrl = await expandShortLink(ctx, link.url, config, logger, proxy);
 
-            const idMatch = finalUrl.match(/id=(\d+)/);
+            const idMatch = finalUrl.match(/\bid=(\d+)/);
             if (idMatch) {
                 finalLink = {
                     platform: name,

@@ -23,17 +23,17 @@ export async function init(ctx: Context, config: PluginConfig) {
 const linkRules = [
     {
         // 匹配 songDetail 链接
-        pattern: /(?:https?:\/\/)?(?:[a-zA-Z0-9-]+\.)+qq\.com\/\S*?songDetail\/([A-Za-z0-9]+)/gi,
+        pattern: /(?:https?:\/\/)?(?:[a-zA-Z0-9-]+\.)+qq\.com\/[^"'\s]*?songDetail\/([A-Za-z0-9]+)/gi,
         type: "song" as const,
     },
     {
         // 匹配 songmid 参数链接
-        pattern: /(?:https?:\/\/)?(?:[a-zA-Z0-9-]+\.)+qq\.com\/\S*?songmid=([A-Za-z0-9]+)/gi,
+        pattern: /(?:https?:\/\/)?(?:[a-zA-Z0-9-]+\.)+qq\.com\/[^"'\s]*?\bsongmid=([A-Za-z0-9]+)/gi,
         type: "song" as const,
     },
     {
-        // 匹配 QQ 音乐客户端生成的短链 (例如 c.y.qq.com, c6.y.qq.com)
-        pattern: /(?:https?:\/\/)?[a-zA-Z0-9-]+\.y\.qq\.com\/base\/fcgi-bin\/u\?__=[a-zA-Z0-9]+/gi,
+        // 匹配 QQ 音乐客户端生成的短链
+        pattern: /(?:https?:\/\/)?[a-zA-Z0-9-]+\.y\.qq\.com\/base\/fcgi-bin\/u\?[^"'\s]*?\b__=[a-zA-Z0-9]+/gi,
         type: "short" as const,
     }
 ];
@@ -76,7 +76,7 @@ export async function match(content: string, ctx: Context, config: PluginConfig)
 
             // 尝试从跳转后的长链中提取 songmid
             let idMatch = /songDetail\/([A-Za-z0-9]+)/.exec(finalUrl);
-            if (!idMatch) idMatch = /songmid=([A-Za-z0-9]+)/.exec(finalUrl);
+            if (!idMatch) idMatch = /\bsongmid=([A-Za-z0-9]+)/.exec(finalUrl);
 
             if (idMatch) {
                 finalLink = {

@@ -3,7 +3,7 @@
 import {Context, Schema} from 'koishi';
 import {init, parsers, parsers_str, processLink, resolveLinks} from './core';
 import {ParsedInfo, PluginConfig} from './types';
-import {getEffectiveSettings, isUserAdmin, sendResult, syncCookiesFromCloud} from './utils';
+import {buildTelemetryEndpoint, getEffectiveSettings, isUserAdmin, sendResult, syncCookiesFromCloud} from './utils';
 import * as fs from 'node:fs';
 
 export const name = 'share-links-analysis';
@@ -74,7 +74,7 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
     Schema.object({
         cookieCloud: Schema.object({
             enable: Schema.boolean().default(false).description('启用 CookieCloud 同步 (优先使用云端 Cookie)'),
-            host: Schema.string().role('link').description('服务器地址 (如 http://cookie.example.com)'),
+            host: Schema.string().role('link').description('服务器地址'),
             uuid: Schema.string().role('secret').description('用户 UUID'),
             password: Schema.string().role('secret').description('端对端加密密码'),
         })
@@ -123,13 +123,13 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
     }).description("调试设置"),
 
     Schema.object({
-        reportEnabled: Schema.boolean().default(false).description("开启性能数据上报"),
-        reportUrl: Schema.string().default("http://127.0.0.1:8080/").description("性能数据上报地址 (HTTP POST)"),
+        enableTelemetry: Schema.boolean().default(false).description("启用遥测数据上报"),
+        telemetryApiUrl: Schema.string().default("http://127.0.0.1:8080").description("遥测服务基础地址"),
     }).description("性能监控"),
 ]) as any;
 
 async function reportMetric(ctx: Context, config: PluginConfig, payload: Record<string, any>) {
-    if (!config.reportEnabled || !config.reportUrl) return;
+    if (!config.enableTelemetry || !config.telemetryApiUrl) return;
 
     const data = {
         app: "share_links_analysis", // 必填 app 标识
@@ -138,7 +138,8 @@ async function reportMetric(ctx: Context, config: PluginConfig, payload: Record<
     };
 
     // 异步发送，不阻塞主流程
-    ctx.http.post(config.reportUrl, data).catch(e => {
+    const targetUrl = buildTelemetryEndpoint(config.telemetryApiUrl, '/api/push');
+    ctx.http.post(targetUrl, data).catch(e => {
         // 仅在调试模式下打印上报错误，避免刷屏
         if (config.debug) {
             ctx.logger('share-links-analysis').warn(`性能数据上报失败: ${e.message}`);

@@ -129,58 +129,58 @@ async function getVideoStream(ctx: Context, aid: number, bvid: string, cid: numb
 const linkRules = [
     // Video: 匹配 BV/av 号
     {
-        pattern: /(?:https?:\/\/)?(?:www|m)?\.bilibili\.com\/video\/([ab]v[0-9a-zA-Z]+)/gi,
+        pattern: /(?:https?:\/\/)?(?:www\.|m\.)?bilibili\.com\/video\/([aA][vV]\d+|[bB][vV][1-9A-HJ-NP-Za-km-z]{10})\b/gi,
         type: "video" as const,
     },
     // Live: 直播
     {
-        pattern: /(?:https?:\/\/)?live\.bilibili\.com(?:\/h5)?\/(\d+)/gi,
+        pattern: /(?:https?:\/\/)?live\.bilibili\.com(?:\/h5)?\/(\d+)\b/gi,
         type: "live" as const,
     },
     // Article: 专栏 (cv号)
     {
-        pattern: /(?:https?:\/\/)?(?:www|m)\.bilibili\.com\/read\/cv(\d+)/gi,
+        pattern: /(?:https?:\/\/)?(?:www\.|m\.)?bilibili\.com\/read\/cv(\d+)\b/gi,
         type: "article" as const,
     },
     // Opus / Dynamic / t.bilibili: 动态与新版专栏
     // 覆盖: m.bilibili.com/dynamic/, www.bilibili.com/opus/, t.bilibili.com/
     {
-        pattern: /(?:https?:\/\/)?(?:(?:www|m)\.bilibili\.com\/(?:opus|dynamic)\/|t\.bilibili\.com\/)(\d+)/gi,
+        pattern: /(?:https?:\/\/)?(?:(?:www\.|m\.)bilibili\.com\/(?:opus|dynamic)\/|t\.bilibili\.com\/)(\d+)\b/gi,
         type: "opus" as const,
     },
     // Space: 个人空间 (支持 space.bilibili.com 和 bilibili.com/space)
     {
-        pattern: /(?:https?:\/\/)?(?:space\.bilibili\.com|(?:www|m)\.bilibili\.com\/space)\/(\d+)/gi,
+        pattern: /(?:https?:\/\/)?(?:space\.bilibili\.com|(?:www|m)\.bilibili\.com\/space)\/(\d+)\b/gi,
         type: "space" as const,
     },
     // Audio: 音乐 (au)
     {
-        pattern: /(?:https?:\/\/)?(?:www|m)\.bilibili\.com\/audio\/au(\d+)/gi,
+        pattern: /(?:https?:\/\/)?(?:www|m)\.bilibili\.com\/audio\/au(\d+)\b/gi,
         type: "audio" as const,
     },
     // AudioMenu: 歌单 (am)
     {
-        pattern: /(?:https?:\/\/)?(?:www|m)\.bilibili\.com\/audio\/am(\d+)/gi,
+        pattern: /(?:https?:\/\/)?(?:www|m)\.bilibili\.com\/audio\/am(\d+)\b/gi,
         type: "audio_menu" as const,
     },
     // Bangumi EP: 番剧单集
     {
-        pattern: /(?:https?:\/\/)?(?:www|m)\.bilibili\.com\/bangumi\/play\/ep(\d+)/gi,
+        pattern: /(?:https?:\/\/)?(?:www|m)\.bilibili\.com\/bangumi\/play\/ep(\d+)\b/gi,
         type: "bangumi_ep" as const,
     },
     // Bangumi SS: 番剧 Season
     {
-        pattern: /(?:https?:\/\/)?(?:www|m)\.bilibili\.com\/bangumi\/play\/ss(\d+)/gi,
+        pattern: /(?:https?:\/\/)?(?:www|m)\.bilibili\.com\/bangumi\/play\/ss(\d+)\b/gi,
         type: "bangumi_ss" as const,
     },
     // Bangumi MD: 媒体 ID
     {
-        pattern: /(?:https?:\/\/)?(?:www|m)\.bilibili\.com\/bangumi\/media\/md(\d+)/gi,
+        pattern: /(?:https?:\/\/)?(?:www|m)\.bilibili\.com\/bangumi\/media\/md(\d+)\b/gi,
         type: "bangumi_md" as const,
     },
     // Short: 短链接 (b23.tv)
     {
-        pattern: /(?:https?:\/\/)?b23\.tv\/([0-9a-zA-Z]+)/gi,
+        pattern: /(?:https?:\/\/)?b23\.tv\/([a-zA-Z0-9]+)\b/gi,
         type: "short" as const,
     },
 ];
@@ -346,7 +346,7 @@ async function processVideo(ctx: Context, config: PluginConfig, link: Link, logg
                     } else if (qn === qnList[qnList.length - 1]) {
                         // 如果已经是能给的最低画质却依然超限，只能交出去，让 utils.ts 去拦截并输出“超限提示”
                         videoUrl = durl.url;
-                        logger.warn(`B站视频即便降至最低画质 qn=${qn} 仍超限，交由底层拦截。`);
+                        logger.debug(`B站视频即便降至最低画质 qn=${qn} 仍超限，交由底层拦截。`);
                     } else {
                         // 超限但还有降级空间
                         logger.debug(`当前画质 qn=${qn} 超限 (${(durl.size/1024/1024).toFixed(2)}MB > ${config.Max_size}MB)，正在降级...`);
