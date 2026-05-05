@@ -558,9 +558,15 @@ export function apply(ctx: Context, config: PluginConfig) {
                                 status = "optimistic_fallback";
                             }
                         } catch (e: any) {
+                            let mergeErrDetail = e.message || String(e);
+                            if (e.cause) {
+                                const causeCode = e.cause.code || '';
+                                const causeMsg = e.cause.message || String(e.cause);
+                                mergeErrDetail += ` [cause: ${causeCode ? causeCode + ': ' : ''}${causeMsg}]`;
+                            }
                             // 其他合并请求抛错时触发回退
                             if (optimisticData) {
-                                logger.warn(`合并任务失败，触发乐观缓存回退: ${cacheKey}`);
+                                logger.warn(`合并任务失败，触发乐观缓存回退: ${cacheKey} | Error: ${mergeErrDetail}`);
                                 result = optimisticData;
                                 const cacheTimeStr = new Date(optimisticTime).toLocaleString('zh-CN', {hour12: false});
                                 result.mainbody = (result.mainbody || '') + `\n\n[⚠️ 并发请求异常，回退 L2 乐观缓存 | 缓存时间: ${cacheTimeStr}]`;
@@ -600,15 +606,22 @@ export function apply(ctx: Context, config: PluginConfig) {
                                 }
                                 return res;
                             } catch (e: any) {
+                                // 构建包含根因的详细错误信息
+                                let errDetail = e.message || String(e);
+                                if (e.cause) {
+                                    const causeCode = e.cause.code || '';
+                                    const causeMsg = e.cause.message || String(e.cause);
+                                    errDetail += ` [cause: ${causeCode ? causeCode + ': ' : ''}${causeMsg}]`;
+                                }
                                 // 抛出异常（网络错误/封禁）时触发乐观回退
                                 if (optimisticData) {
-                                    logger.warn(`解析抛出异常，触发乐观缓存回退: ${cacheKey} | Error: ${e.message}`);
+                                    logger.warn(`解析抛出异常，触发乐观缓存回退: ${cacheKey} | Error: ${errDetail}`);
                                     const cacheTimeStr = new Date(optimisticTime).toLocaleString('zh-CN', {hour12: false});
                                     optimisticData.mainbody = (optimisticData.mainbody || '') + `\n\n[⚠️ 接口触发异常，回退 L2 乐观缓存 | 缓存时间: ${cacheTimeStr}]`;
                                     (optimisticData as any)._isOptimisticFallback = true;
                                     return optimisticData;
                                 }
-                                logger.warn(`解析任务出错: ${e}`);
+                                logger.warn(`解析任务出错: ${errDetail}`);
                                 throw e;
                             } finally {
                                 // 执行上报
@@ -645,9 +658,19 @@ export function apply(ctx: Context, config: PluginConfig) {
                 linkCount++;
             } catch (e: any) {
                 status = "error";
-                errorMsg = e.message || String(e);
+                // 构建包含根因的详细错误信息
+                let details = e.message || String(e);
+                if (e.cause) {
+                    const causeCode = e.cause.code || '';
+                    const causeMsg = e.cause.message || String(e.cause);
+                    details += ` [cause: ${causeCode ? causeCode + ': ' : ''}${causeMsg}]`;
+                }
+                if (e.response?.status) {
+                    details += ` [HTTP ${e.response.status}]`;
+                }
+                errorMsg = details;
                 errorStack = e.stack || String(e);
-                logger.warn(`处理异常: ${e}`);
+                logger.warn(`处理异常: ${details}`);
             } finally {
                 // 4. 上报针对性排障数据
                 const totalTime = Date.now() - startTotal;
@@ -700,7 +723,7 @@ export function apply(ctx: Context, config: PluginConfig) {
 
                     // === 6. 错误追踪 ===
                     error_msg: errorMsg,
-                    error_stack: status === 'error' ? truncatedStack : "",
+                    error_stack: truncatedStack,
 
                     // === 7. 耗时拆解 (性能瓶颈定位) ===
                     time_total_ms: totalTime,

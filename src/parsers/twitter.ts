@@ -266,7 +266,9 @@ async function handleSyndicationFallback(
         const reqOptions: any = {
             headers: {
                 'User-Agent': config.userAgent,
-                'Accept': '*/*'
+                'Accept': '*/*',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Referer': 'https://platform.twitter.com/'
             }
         };
         if (config.proxy) reqOptions.proxyAgent = config.proxy;
@@ -336,7 +338,9 @@ async function handleSyndicationFallback(
         };
 
     } catch (e: any) {
-        logger.error(`Syndication fallback failed: ${e.message}`);
+        const causeDetail = e.cause ? ` (cause: ${e.cause.code || e.cause.message || e.cause})` : '';
+        logger.error(`Syndication fallback failed: ${e.message}${causeDetail}`);
+        if (e.response?.status) logger.error(`  HTTP status: ${e.response.status}`);
         // 抛出错误让外部统一处理 404 等信息
         throw e;
     }
@@ -427,16 +431,20 @@ export async function process(
         const isNotFound = error.response?.status === 404;
 
         if (!isNotFound) {
-            logger.warn(`VxTwitter API 失败 (${error.message})，尝试 Syndication API Fallback...`);
+            const causeDetail = error.cause ? ` (cause: ${error.cause.code || error.cause.message || error.cause})` : '';
+            logger.warn(`VxTwitter API 失败 (${error.message}${causeDetail})，尝试 Syndication API Fallback...`);
             try {
                 return await handleSyndicationFallback(ctx, config, tweetId, session);
             } catch (fallbackError: any) {
-                logger.error(`Fallback 失败: ${fallbackError.message}`);
+                const fbCauseDetail = fallbackError.cause ? ` (cause: ${fallbackError.cause.code || fallbackError.cause.message || fallbackError.cause})` : '';
+                logger.error(`Fallback 失败: ${fallbackError.message}${fbCauseDetail}`);
+                logger.error(`Twitter 解析失败: 主 API 和 Fallback 均失败`);
             }
+        } else {
+            logger.error(`Twitter 解析失败: ${error.message}`);
         }
 
         // 最终错误处理
-        logger.error(`Twitter 解析失败: ${error.message}`);
         if (error.response?.status === 404) {
             await session.send('推文不存在或已被删除');
         } else if (error.response?.status === 429) {

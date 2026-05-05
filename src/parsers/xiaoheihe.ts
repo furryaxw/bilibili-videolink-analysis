@@ -10,11 +10,11 @@ export const name = "xiaoheihe";
 
 const linkRules = [
     {
-        pattern: /https?:\/\/api\.xiaoheihe\.cn\/v3\/bbs\/app\/api\/web\/share\?[^"'\s]*?\blink_id=(\d+)/gi,
+        pattern: /https?:\/\/api\.xiaoheihe\.cn\/v3\/bbs\/app\/api\/web\/share\?[^"'\s]*?\blink_id=([a-zA-Z0-9]+)/gi,
         type: "bbs_api" as const,
     },
     {
-        pattern: /https?:\/\/www\.xiaoheihe\.cn\/app\/bbs\/link\/(\d+)/gi,
+        pattern: /https?:\/\/www\.xiaoheihe\.cn\/app\/bbs\/link\/([a-zA-Z0-9]+)/gi,
         type: "bbs" as const,
     }
 ];
