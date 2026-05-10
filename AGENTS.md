@@ -12,12 +12,12 @@ This is a [Koishi](https://koishi.chat) plugin that parses shared links from soc
 
 ### Entrypoints
 
-| File | Role |
-|---|---|
-| `src/index.ts` | Plugin entry — registers commands, middleware, DB tables, cache lifecycle |
-| `src/core.ts` | Parser registry — assembles `ParserModule[]`, dispatches link resolution |
+| File           | Role                                                                          |
+|----------------|-------------------------------------------------------------------------------|
+| `src/index.ts` | Plugin entry — registers commands, middleware, DB tables, cache lifecycle     |
+| `src/core.ts`  | Parser registry — assembles `ParserModule[]`, dispatches link resolution      |
 | `src/types.ts` | All TS types; extends Koishi module declarations (`ctx.puppeteer`, DB tables) |
-| `src/utils.ts` | Cookie sync, file download/cache, result sending, proxy, admin checks |
+| `src/utils.ts` | Cookie sync, file download/cache, result sending, proxy, admin checks         |
 
 ### Parser plugins (`src/parsers/`)
 
@@ -59,17 +59,17 @@ The compiled output is in-repo and `main`/`typings` point to it, but `.gitignore
 
 All under parent `share` (authority 1 unless noted):
 
-| Command | Auth | Purpose |
-|---|---|---|
-| `share` | 1 | Show current group parser/NSFW status |
-| `share.parsers <name> <bool>` | 1 | Toggle a parser for current group (admin-only) |
-| `share.nsfw <bool>` | 1 | Toggle NSFW for current group (admin-only) |
-| `share.reset` | 1 | Reset group to global defaults (admin-only) |
-| `share.l2cache <url>` | 1 | View cached parse result (shows L1/L2 status) |
-| `share.forceparse <url>` | 1 | Parse link ignoring all caches, update cache |
-| `share.directlink <url> [quality]` | 1 | Get direct video/audio URL; `high`/`low` quality, skips size-based degradation |
-| `share.clean` | 3 | Purge all caches and cached files |
-| `share.refresh` | 3 | Force-refresh all platform cookies (Cloud + local) |
+| Command                            | Auth | Purpose                                                                        |
+|------------------------------------|------|--------------------------------------------------------------------------------|
+| `share`                            | 1    | Show current group parser/NSFW status                                          |
+| `share.parsers <name> <bool>`      | 1    | Toggle a parser for current group (admin-only)                                 |
+| `share.nsfw <bool>`                | 1    | Toggle NSFW for current group (admin-only)                                     |
+| `share.reset`                      | 1    | Reset group to global defaults (admin-only)                                    |
+| `share.checkcache <url>`           | 2    | View cached parse result (shows L1/L2 status)                                  |
+| `share.forceparse <url>`           | 2    | Parse link ignoring all caches, update cache                                   |
+| `share.directlink <url> [quality]` | 1    | Get direct video/audio URL; `high`/`low` quality, skips size-based degradation |
+| `share.clean`                      | 3    | Purge all caches and cached files                                              |
+| `share.refresh`                    | 3    | Force-refresh all platform cookies (Cloud + local)                             |
 
 ### Send modes
 - `plain` — individual messages per result item
