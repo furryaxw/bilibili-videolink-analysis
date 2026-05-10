@@ -55,6 +55,22 @@ The plugin relies on Koishi built-in services, not direct npm dependencies:
 ### `lib/` is committed but gitignored
 The compiled output is in-repo and `main`/`typings` point to it, but `.gitignore` lists `lib/`. New compilations won't be tracked unless `--force` added.
 
+### Commands
+
+All under parent `share` (authority 1 unless noted):
+
+| Command | Auth | Purpose |
+|---|---|---|
+| `share` | 1 | Show current group parser/NSFW status |
+| `share.parsers <name> <bool>` | 1 | Toggle a parser for current group (admin-only) |
+| `share.nsfw <bool>` | 1 | Toggle NSFW for current group (admin-only) |
+| `share.reset` | 1 | Reset group to global defaults (admin-only) |
+| `share.l2cache <url>` | 1 | View cached parse result (shows L1/L2 status) |
+| `share.forceparse <url>` | 1 | Parse link ignoring all caches, update cache |
+| `share.directlink <url> [quality]` | 1 | Get direct video/audio URL; `high`/`low` quality, skips size-based degradation |
+| `share.clean` | 3 | Purge all caches and cached files |
+| `share.refresh` | 3 | Force-refresh all platform cookies (Cloud + local) |
+
 ### Send modes
 - `plain` — individual messages per result item
 - `forward` — merged forward node (OneBot `send_forward_msg`)
