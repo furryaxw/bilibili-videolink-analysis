@@ -310,6 +310,99 @@ export function apply(ctx: Context, config: PluginConfig) {
             return '缓存及对应文件已清理。';
         });
 
+    cmd.subcommand('.checkcache <url:string>', '查看缓存数据状态', {authority: 2})
+        .action(async ({session}, url) => {
+            if (!session) return '会话不可用。';
+            if (!config.enableCache) return '缓存功能未启用。';
+
+            const links = await resolveLinks(url, ctx, config);
+            if (links.length === 0) return '未在该链接中识别到支持的内容。';
+            const link = links[0];
+            const cacheKey = `${link.platform}:${link.id}`;
+            const cached = await ctx.database.get('sla_parse_cache', cacheKey);
+            if (cached.length === 0) return `未找到缓存数据: ${cacheKey}`;
+
+            const entry = cached[0];
+            const ageMs = Date.now() - entry.created_at;
+            const isExpiredL1 = config.cacheExpiration > 0 && (ageMs > config.cacheExpiration * 60 * 60 * 1000);
+            const isExpiredL2 = config.optimisticExpiration > 0 && (ageMs > config.optimisticExpiration * 60 * 60 * 1000);
+
+            if (isExpiredL2) return `缓存数据已完全过期: ${cacheKey}`;
+
+            const cacheTimeStr = new Date(entry.created_at).toLocaleString('zh-CN', {hour12: false});
+            const result = {...entry.data};
+            if (isExpiredL1 && config.optimisticCache) {
+                result.mainbody = (result.mainbody || '') + `\n\n[📦 L2 缓存 | 缓存时间: ${cacheTimeStr}]`;
+            } else {
+                result.mainbody = (result.mainbody || '') + `\n\n[📦 L1 缓存 | 缓存时间: ${cacheTimeStr}]`;
+            }
+
+            const sendStats = {downloadTime: 0, sendTime: 0, errors: [] as string[]};
+            await sendResult(ctx, session, config, result, logger, sendStats);
+            return;
+        });
+
+    cmd.subcommand('.forceparse <url:string>', '忽略缓存强制解析链接', {authority: 2})
+        .action(async ({session}, url) => {
+            if (!session) return '会话不可用。';
+            const links = await resolveLinks(url, ctx, config);
+            if (links.length === 0) return '未在该链接中识别到支持的内容。';
+            const link = links[0];
+
+            if (config.waitTip_Switch) await session.send(config.waitTip_Switch);
+
+            const result = await processLink(ctx, config, link, session);
+            if (!result) return `解析失败: ${link.platform}/${link.type}:${link.id}`;
+
+            const cacheKey = `${link.platform}:${link.id}`;
+            if (config.enableCache) {
+                await ctx.database.upsert('sla_parse_cache', [{
+                    key: cacheKey,
+                    data: result,
+                    created_at: Date.now()
+                }]);
+            }
+
+            const sendStats = {downloadTime: 0, sendTime: 0, errors: [] as string[]};
+            await sendResult(ctx, session, config, result, logger, sendStats);
+            return;
+        });
+
+    cmd.subcommand('.directlink <url:string> [quality:string]', '获取视频/音频直链', {authority: 1})
+        .action(async ({session}, url, quality) => {
+            if (!session) return '会话不可用。';
+            const links = await resolveLinks(url, ctx, config);
+            if (links.length === 0) return '未在该链接中识别到支持的内容。';
+            const link = links[0];
+
+            let clarity = config.Video_ClarityPriority;
+            if (quality) {
+                const q = quality.trim().toLowerCase();
+                if (q === 'high' || q === 'h' || q === '高' || q === '高清晰度') {
+                    clarity = '2' as const;
+                } else if (q === 'low' || q === 'l' || q === '低' || q === '低清晰度') {
+                    clarity = '1' as const;
+                } else {
+                    return `无效的画质参数: ${quality}。可用: high/h/高清晰度, low/l/低清晰度`;
+                }
+            }
+
+            const modifiedConfig = {...config, Video_ClarityPriority: clarity, Max_size: Number.MAX_SAFE_INTEGER};
+            const result = await processLink(ctx, modifiedConfig, link, session);
+            if (!result) return `解析失败: ${link.platform}/${link.type}:${link.id}`;
+
+            if (result.files.length === 0) {
+                return `未获取到直链: ${link.platform}/${link.type}:${link.id}\n该内容类型可能不支持直链获取。`;
+            }
+
+            const clarityLabel = clarity === '2' ? '高清晰度优先' : '低清晰度优先';
+            let output = `直链结果 (${link.platform}/${link.type}:${link.id}):\n画质策略: ${clarityLabel}\n标题: ${result.title}\n`;
+            for (const [i, file] of result.files.entries()) {
+                output += `\n[${i + 1}] ${file.type}: ${file.url}`;
+            }
+            return output;
+        });
+
     cmd.subcommand('.refresh', '强制刷新所有 Cookie', {authority: 3})
         .action(async ({session}) => {
             await session?.send('🔄 开始执行 Cookie 全量刷新流程...');
