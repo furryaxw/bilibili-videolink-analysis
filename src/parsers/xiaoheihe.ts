@@ -368,7 +368,7 @@ export async function process(
             sourceUrl: link.url,
             stats: status,
             coverUrl: postData.coverImage,
-            files: postData.videoUrl ? [{ type: 'video', url: postData.videoUrl }] : []
+            files: postData.videoUrl ? [{type: 'video', url: postData.videoUrl}] : []
         };
     } catch (error) {
         logger.error('解析失败:', error)

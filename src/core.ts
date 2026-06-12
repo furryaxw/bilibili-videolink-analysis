@@ -19,6 +19,7 @@ interface ParserModule {
     init?: (ctx: Context, config: PluginConfig) => Promise<any> | any;
     lc_get_cookie?: (ctx: Context, config: PluginConfig) => Promise<string>;
     process: (ctx: Context, config: PluginConfig, link: Link, session: Session) => Promise<ParsedInfo | null>;
+
     [key: string]: any;
 }
 

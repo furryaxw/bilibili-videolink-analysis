@@ -18,11 +18,17 @@ export interface ParsedInfo {
     files: FileInfo[];
     sourceUrl: string;
     stats: string;
+    _cache?: ParsedInfoCacheStatus;
 }
 
 export interface FileInfo {
     type: 'video' | 'audio' | 'generic'
     url: string;
+}
+
+export interface ParsedInfoCacheStatus {
+    parse?: string;
+    file?: string;
 }
 
 // 插件配置接口
@@ -133,6 +139,7 @@ declare module 'koishi' {
         sla_parse_cache: SlaParseCache;
         sla_file_cache: SlaFileCache;
         sla_cookie_cache: SlaCookieCache;
+        sla_parse_timeline: SlaParseTimelineNode;
         sla_group_settings: SlaGroupSettings;
     }
 }
@@ -155,6 +162,15 @@ export interface SlaCookieCache {
     platform: string;
     cookie: string;
     updated_at: number;
+}
+
+export interface SlaParseTimelineNode {
+    node_id: string;
+    cache_key: string;
+    data: ParsedInfo;
+    delta: string;
+    created_at: number;
+    last_checked_at: number;
 }
 
 export interface SlaGroupSettings {

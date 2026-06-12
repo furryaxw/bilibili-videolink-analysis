@@ -2,8 +2,14 @@
 
 import {Context, Schema} from 'koishi';
 import {init, parsers, parsers_str, processLink, resolveLinks} from './core';
-import {ParsedInfo, PluginConfig} from './types';
-import {buildTelemetryEndpoint, getEffectiveSettings, isUserAdmin, sendResult, syncCookiesFromCloud} from './utils';
+import {ParsedInfo, PluginConfig, SlaParseCache, SlaParseTimelineNode} from './types';
+import {
+    buildTelemetryEndpoint,
+    getEffectiveSettings,
+    isUserAdmin,
+    sendResult,
+    syncCookiesFromCloud
+} from './utils';
 import * as fs from 'node:fs';
 
 export const name = 'share-links-analysis';
@@ -61,8 +67,9 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
 ----------
 {mainbody}
 ----------
+{cache}
 {sourceUrl}`
-        ).description('图文/视频输出格式。<br/>可用占位符: `{title}`, `{cover}`, `{authorName}`, `{mainbody}`, `{stats}`, `{sourceUrl}`'),
+        ).description('图文/视频输出格式。<br/>可用占位符: `{title}`, `{cover}`, `{authorName}`, `{mainbody}`, `{stats}`, `{cache}`, `{sourceUrl}`'),
     }).description("格式化模板"),
 
     Schema.object({
@@ -147,6 +154,295 @@ async function reportMetric(ctx: Context, config: PluginConfig, payload: Record<
     });
 }
 
+function getCombinedRetentionHours(config: PluginConfig): number {
+    const expirations = [config.cacheExpiration, config.optimisticExpiration];
+    if (expirations.some(value => value === 0)) return 0;
+    return Math.max(...expirations);
+}
+
+function getRetentionThreshold(hours: number): number | null {
+    if (hours === 0) return null;
+    return Date.now() - hours * 60 * 60 * 1000;
+}
+
+function normalizeForCompare(value: any): any {
+    if (Array.isArray(value)) return value.map(normalizeForCompare);
+    if (value && typeof value === 'object') {
+        const output: Record<string, any> = {};
+        for (const key of Object.keys(value).sort()) {
+            if (key.startsWith('_')) continue;
+            output[key] = normalizeForCompare(value[key]);
+        }
+        return output;
+    }
+    return value;
+}
+
+function stableStringify(value: any): string {
+    return JSON.stringify(normalizeForCompare(value));
+}
+
+function isSameParsedInfo(a: ParsedInfo, b: ParsedInfo): boolean {
+    return stableStringify(a) === stableStringify(b);
+}
+
+function formatDiffValue(value: any): string {
+    if (value === undefined) return 'undefined';
+    if (value === null) return 'null';
+    if (typeof value === 'string') return value.length > 160 ? `${value.slice(0, 157)}...` : value;
+    const text = JSON.stringify(value);
+    return text.length > 160 ? `${text.slice(0, 157)}...` : text;
+}
+
+function collectDiffLines(before: any, after: any, path = ''): string[] {
+    if (stableStringify(before) === stableStringify(after)) return [];
+    if (Array.isArray(before) || Array.isArray(after)) {
+        return [
+            `- ${path || 'root'}: ${formatDiffValue(before)}`,
+            `+ ${path || 'root'}: ${formatDiffValue(after)}`
+        ];
+    }
+    if (
+        before && after &&
+        typeof before === 'object' &&
+        typeof after === 'object'
+    ) {
+        const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+        const lines: string[] = [];
+        for (const key of [...keys].sort()) {
+            if (key.startsWith('_')) continue;
+            const nextPath = path ? `${path}.${key}` : key;
+            lines.push(...collectDiffLines(before[key], after[key], nextPath));
+        }
+        return lines;
+    }
+    return [
+        `- ${path || 'root'}: ${formatDiffValue(before)}`,
+        `+ ${path || 'root'}: ${formatDiffValue(after)}`
+    ];
+}
+
+function buildParsedInfoDelta(previous: ParsedInfo | null, current: ParsedInfo): string {
+    if (!previous) return 'base';
+    const lines = collectDiffLines(normalizeForCompare(previous), normalizeForCompare(current));
+    return lines.length > 0 ? lines.join('\n') : 'no changes';
+}
+
+function summarizeParsedInfo(data: ParsedInfo): string {
+    const parts = [
+        `标题: ${data.title || '无标题'}`,
+        `作者: ${data.authorName || '未知'}`,
+        `文件: ${Array.isArray(data.files) ? data.files.length : 0}`,
+    ];
+    if (data.stats) parts.push(`统计: ${data.stats}`);
+    return parts.join('\n');
+}
+
+function summarizeDelta(delta: string): string {
+    const lines = delta.split('\n');
+    const text = lines.length > 8
+        ? `${lines.slice(0, 8).join('\n')}\n...`
+        : delta;
+    return text.length > 800 ? `${text.slice(0, 797)}...` : text;
+}
+
+function formatTime(timestamp: number): string {
+    return new Date(timestamp).toLocaleString('zh-CN', {hour12: false});
+}
+
+function createTimelineNodeId(cacheKey: string, createdAt = Date.now()): string {
+    const safeKey = cacheKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+    return `${safeKey}:${createdAt}:${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function getTimelineNodes(ctx: Context, cacheKey: string): Promise<SlaParseTimelineNode[]> {
+    const nodes = await ctx.database.get('sla_parse_timeline', {cache_key: cacheKey});
+    return nodes.sort((a, b) => a.created_at - b.created_at);
+}
+
+function isTimelineNodeActive(config: PluginConfig, node: SlaParseTimelineNode): boolean {
+    const threshold = getRetentionThreshold(getCombinedRetentionHours(config));
+    if (threshold === null) return true;
+    return (node.last_checked_at || node.created_at) >= threshold;
+}
+
+async function getActiveTimelineNodes(ctx: Context, config: PluginConfig, cacheKey: string): Promise<SlaParseTimelineNode[]> {
+    const nodes = await getTimelineNodes(ctx, cacheKey);
+    return nodes.filter(node => isTimelineNodeActive(config, node));
+}
+
+async function touchTimelineNode(ctx: Context, node: SlaParseTimelineNode, checkedAt = Date.now()): Promise<SlaParseTimelineNode> {
+    const touched = {...node, last_checked_at: checkedAt};
+    await ctx.database.upsert('sla_parse_timeline', [touched]);
+    return touched;
+}
+
+async function createTimelineNodeFromCache(
+    ctx: Context,
+    cacheKey: string,
+    result: ParsedInfo,
+    createdAt: number,
+    delta = 'base'
+): Promise<SlaParseTimelineNode> {
+    const node: SlaParseTimelineNode = {
+        node_id: createTimelineNodeId(cacheKey, createdAt),
+        cache_key: cacheKey,
+        data: result,
+        delta,
+        created_at: createdAt,
+        last_checked_at: createdAt,
+    };
+    await ctx.database.upsert('sla_parse_timeline', [node]);
+    return node;
+}
+
+async function upsertTimelineIfChanged(
+    ctx: Context,
+    config: PluginConfig,
+    cacheKey: string,
+    result: ParsedInfo
+): Promise<SlaParseTimelineNode> {
+    const nodes = await getActiveTimelineNodes(ctx, config, cacheKey);
+    const latest = nodes[nodes.length - 1];
+    if (latest && isSameParsedInfo(latest.data, result)) {
+        return touchTimelineNode(ctx, latest);
+    }
+
+    const now = Date.now();
+    const node: SlaParseTimelineNode = {
+        node_id: createTimelineNodeId(cacheKey, now),
+        cache_key: cacheKey,
+        data: result,
+        delta: buildParsedInfoDelta(latest?.data ?? null, result),
+        created_at: now,
+        last_checked_at: now,
+    };
+    await ctx.database.upsert('sla_parse_timeline', [node]);
+    return node;
+}
+
+async function removeExpiredTimelineNodes(ctx: Context, threshold: number | null) {
+    if (threshold === null) return;
+    await ctx.database.remove('sla_parse_timeline', {
+        last_checked_at: {$lt: threshold}
+    });
+}
+
+async function pruneExpiredTimelineNodes(ctx: Context, config: PluginConfig): Promise<void> {
+    await removeExpiredTimelineNodes(ctx, getRetentionThreshold(getCombinedRetentionHours(config)));
+}
+
+async function getLatestTimelineNode(
+    ctx: Context,
+    config: PluginConfig,
+    cacheKey: string
+): Promise<SlaParseTimelineNode | null> {
+    const nodes = await getActiveTimelineNodes(ctx, config, cacheKey);
+    return nodes[nodes.length - 1] || null;
+}
+
+function registerLegacyParseCacheModel(ctx: Context) {
+    ctx.model.extend('sla_parse_cache', {
+        key: 'string',
+        data: 'json',
+        created_at: 'double',
+    }, {primary: 'key'});
+}
+
+async function getLegacyParseCacheEntries(ctx: Context): Promise<SlaParseCache[]> {
+    try {
+        registerLegacyParseCacheModel(ctx);
+        return await ctx.database.get('sla_parse_cache', {}) as SlaParseCache[];
+    } catch {
+        return [];
+    }
+}
+
+async function migrateLegacyParseCache(ctx: Context): Promise<{
+    legacyParse: number,
+    migrated: number,
+    skipped: number,
+    invalid: number,
+    mismatched: number
+}> {
+    const legacyEntries = await getLegacyParseCacheEntries(ctx);
+    let migrated = 0;
+    let skipped = 0;
+    let invalid = 0;
+
+    for (const entry of legacyEntries) {
+        if (!entry?.key || !entry.data || !entry.created_at) {
+            invalid++;
+            continue;
+        }
+
+        const nodes = await getTimelineNodes(ctx, entry.key);
+        const sameNode = nodes.find(node => isSameParsedInfo(node.data, entry.data));
+        if (sameNode) {
+            await touchTimelineNode(ctx, sameNode, Math.max(sameNode.last_checked_at || 0, entry.created_at));
+            skipped++;
+            continue;
+        }
+
+        const latest = nodes[nodes.length - 1];
+        const delta = latest ? buildParsedInfoDelta(latest.data, entry.data) : 'base';
+        await createTimelineNodeFromCache(ctx, entry.key, entry.data, entry.created_at, delta);
+        migrated++;
+    }
+
+    let mismatched = 0;
+    for (const entry of legacyEntries) {
+        if (!entry?.key || !entry.data) continue;
+        const nodes = await getTimelineNodes(ctx, entry.key);
+        if (!nodes.some(node => isSameParsedInfo(node.data, entry.data))) {
+            mismatched++;
+        }
+    }
+
+    return {
+        legacyParse: legacyEntries.length,
+        migrated,
+        skipped,
+        invalid,
+        mismatched,
+    };
+}
+
+async function dropLegacyParseCache(ctx: Context): Promise<string> {
+    const messages: string[] = [];
+    try {
+        registerLegacyParseCacheModel(ctx);
+        await ctx.database.remove('sla_parse_cache', {});
+        messages.push('旧 sla_parse_cache 数据已清空。');
+    } catch (e: any) {
+        messages.push(`清空旧 sla_parse_cache 失败: ${e.message || String(e)}`);
+    }
+
+    const database = ctx.database as any;
+    const candidates = [
+        {fn: database.drop, args: ['sla_parse_cache']},
+        {fn: database.dropTable, args: ['sla_parse_cache']},
+        {fn: database.dropTables, args: [['sla_parse_cache']]},
+    ];
+    let dropped = false;
+    for (const candidate of candidates) {
+        if (typeof candidate.fn !== 'function') continue;
+        try {
+            const result = candidate.fn.apply(database, candidate.args);
+            if (result && typeof result.then === 'function') await result;
+            messages.push('旧表 sla_parse_cache 已尝试删除。');
+            dropped = true;
+            break;
+        } catch {
+        }
+    }
+    if (!dropped) {
+        messages.push('当前数据库适配器未暴露删除 sla_parse_cache 的表 API，请按需手动 drop。');
+    }
+
+    return messages.join('\n');
+}
+
 export function apply(ctx: Context, config: PluginConfig) {
     // 数据库模型定义
     ctx.model.extend('sla_cookie_cache', {
@@ -164,13 +460,6 @@ export function apply(ctx: Context, config: PluginConfig) {
         primary: 'guildId',
     });
 
-    // 解析结果缓存
-    ctx.model.extend('sla_parse_cache', {
-        key: 'string', // platform + ':' + id
-        data: 'json',
-        created_at: 'double',
-    }, {primary: 'key'});
-
     // 资源文件缓存 (hash)
     ctx.model.extend('sla_file_cache', {
         hash: 'string', // URL MD5
@@ -178,6 +467,16 @@ export function apply(ctx: Context, config: PluginConfig) {
         url: 'string',
         created_at: 'double',
     }, {primary: 'hash'});
+
+    // 解析结果时间线
+    ctx.model.extend('sla_parse_timeline', {
+        node_id: 'string',
+        cache_key: 'string',
+        data: 'json',
+        delta: 'text',
+        created_at: 'double',
+        last_checked_at: 'double',
+    }, {primary: 'node_id'});
 
     const logger = ctx.logger('share-links-analysis');
     // 根据配置设置日志等级
@@ -190,36 +489,14 @@ export function apply(ctx: Context, config: PluginConfig) {
     // 清理缓存函数
     const cleanExpiredCache = async () => {
         if (!config.enableCache) return;
-        const now = Date.now();
-
-        let maxExpiration = 0;
-
-        if (config.optimisticCache) {
-            // 如果开启了乐观缓存，且 L1 或 L2 中有任何一个设为 0（永不过期），则直接跳过定时清理
-            if (config.cacheExpiration === 0 || config.optimisticExpiration === 0) {
-                return;
-            }
-            // 只有两者都不为 0 时，才取它们的最大值作为物理清理时间
-            maxExpiration = Math.max(config.cacheExpiration, config.optimisticExpiration);
-        } else {
-            // 如果没开启乐观缓存，且 L1 设为 0（永不过期），直接跳过
-            if (config.cacheExpiration === 0) {
-                return;
-            }
-            maxExpiration = config.cacheExpiration;
-        }
-
-        const threshold = now - maxExpiration * 60 * 60 * 1000;
-
-        // 清理解析缓存
-        await ctx.database.remove('sla_parse_cache', {
-            created_at: {$lt: threshold}
-        });
+        const fileAndTimelineThreshold = getRetentionThreshold(getCombinedRetentionHours(config));
 
         // 清理文件缓存
-        const expiredFiles = await ctx.database.get('sla_file_cache', {
-            created_at: {$lt: threshold}
-        });
+        const expiredFiles = fileAndTimelineThreshold === null
+            ? []
+            : await ctx.database.get('sla_file_cache', {
+                created_at: {$lt: fileAndTimelineThreshold}
+            });
 
         for (const file of expiredFiles) {
             try {
@@ -231,9 +508,12 @@ export function apply(ctx: Context, config: PluginConfig) {
             }
         }
 
-        await ctx.database.remove('sla_file_cache', {
-            created_at: {$lt: threshold}
-        });
+        if (fileAndTimelineThreshold !== null) {
+            await ctx.database.remove('sla_file_cache', {
+                created_at: {$lt: fileAndTimelineThreshold}
+            });
+            await pruneExpiredTimelineNodes(ctx, config);
+        }
 
         if (expiredFiles.length > 0) {
             logger.info(`已自动清理 ${expiredFiles.length} 个过期文件。`);
@@ -292,10 +572,29 @@ export function apply(ctx: Context, config: PluginConfig) {
             return '已重置为全局默认设置。';
         });
 
+    cmd.subcommand('.migratecache', '迁移旧解析缓存到新时间线并校验', {authority: 4})
+        .action(async () => {
+            const result = await migrateLegacyParseCache(ctx);
+            const status = result.mismatched === 0 ? '校验通过' : `校验失败 ${result.mismatched} 条`;
+            return [
+                '旧解析缓存迁移完成。',
+                `旧解析缓存记录: ${result.legacyParse}`,
+                `新增节点: ${result.migrated}`,
+                `已存在/续期: ${result.skipped}`,
+                `无效记录: ${result.invalid}`,
+                status,
+            ].join('\n');
+        });
+
+    cmd.subcommand('.dropoldcache', '删除旧 sla_parse_cache 数据/表', {authority: 4})
+        .action(async () => {
+            return await dropLegacyParseCache(ctx);
+        });
+
     // 清除缓存指令
     cmd.subcommand('.clean', '清除所有缓存和文件', {authority: 3})
         .action(async () => {
-            await ctx.database.remove('sla_parse_cache', {});
+            await ctx.database.remove('sla_parse_timeline', {});
 
             const allFiles = await ctx.database.get('sla_file_cache', {});
             for (const file of allFiles) {
@@ -310,8 +609,8 @@ export function apply(ctx: Context, config: PluginConfig) {
             return '缓存及对应文件已清理。';
         });
 
-    cmd.subcommand('.checkcache <url:string>', '查看缓存数据状态', {authority: 2})
-        .action(async ({session}, url) => {
+    cmd.subcommand('.checkcache <url:string> [index:string]', '查看缓存时间线/读取指定节点', {authority: 1})
+        .action(async ({session}, url, index) => {
             if (!session) return '会话不可用。';
             if (!config.enableCache) return '缓存功能未启用。';
 
@@ -319,24 +618,46 @@ export function apply(ctx: Context, config: PluginConfig) {
             if (links.length === 0) return '未在该链接中识别到支持的内容。';
             const link = links[0];
             const cacheKey = `${link.platform}:${link.id}`;
-            const cached = await ctx.database.get('sla_parse_cache', cacheKey);
-            if (cached.length === 0) return `未找到缓存数据: ${cacheKey}`;
+            const nodes = await getTimelineNodes(ctx, cacheKey);
 
-            const entry = cached[0];
-            const ageMs = Date.now() - entry.created_at;
-            const isExpiredL1 = config.cacheExpiration > 0 && (ageMs > config.cacheExpiration * 60 * 60 * 1000);
-            const isExpiredL2 = config.optimisticExpiration > 0 && (ageMs > config.optimisticExpiration * 60 * 60 * 1000);
+            if (!index) {
+                if (nodes.length === 0) return `未找到历史节点: ${cacheKey}`;
 
-            if (isExpiredL2) return `缓存数据已完全过期: ${cacheKey}`;
+                const latest = nodes[nodes.length - 1];
+                const lines = [
+                    `历史节点: ${cacheKey}`,
+                    summarizeParsedInfo(latest.data),
+                    ''
+                ];
 
-            const cacheTimeStr = new Date(entry.created_at).toLocaleString('zh-CN', {hour12: false});
-            const result = {...entry.data};
-            if (isExpiredL1 && config.optimisticCache) {
-                result.mainbody = (result.mainbody || '') + `\n\n[📦 L2 缓存 | 缓存时间: ${cacheTimeStr}]`;
-            } else {
-                result.mainbody = (result.mainbody || '') + `\n\n[📦 L1 缓存 | 缓存时间: ${cacheTimeStr}]`;
+                nodes.forEach((node, nodeIndex) => {
+                    lines.push(`#${nodeIndex + 1} | ${formatTime(node.created_at)}`);
+                    lines.push(summarizeDelta(node.delta));
+                });
+
+                return lines.join('\n');
             }
 
+            let selectedIndex: number;
+            const normalizedIndex = index.trim().toLowerCase();
+            if (normalizedIndex === 'l' || normalizedIndex === 'latest') {
+                if (nodes.length === 0) return `未找到历史节点: ${cacheKey}`;
+                selectedIndex = nodes.length;
+            } else {
+                selectedIndex = Number.parseInt(normalizedIndex, 10);
+                if (!Number.isInteger(selectedIndex) || `${selectedIndex}` !== normalizedIndex || selectedIndex < 1) {
+                    return '节点编号必须是从 1 开始的整数，或 l/latest。';
+                }
+            }
+
+            const node = nodes[selectedIndex - 1];
+            if (!node) return `节点不存在: #${selectedIndex}`;
+
+            const result = {...node.data};
+            result._cache = {
+                ...result._cache,
+                parse: `Timeline #${selectedIndex} | 节点时间: ${formatTime(node.created_at)}`
+            };
             const sendStats = {downloadTime: 0, sendTime: 0, errors: [] as string[]};
             await sendResult(ctx, session, config, result, logger, sendStats);
             return;
@@ -356,11 +677,8 @@ export function apply(ctx: Context, config: PluginConfig) {
 
             const cacheKey = `${link.platform}:${link.id}`;
             if (config.enableCache) {
-                await ctx.database.upsert('sla_parse_cache', [{
-                    key: cacheKey,
-                    data: result,
-                    created_at: Date.now()
-                }]);
+                await upsertTimelineIfChanged(ctx, config, cacheKey, result);
+                result._cache = {...result._cache, parse: `强制刷新 | 缓存时间: ${formatTime(Date.now())}`};
             }
 
             const sendStats = {downloadTime: 0, sendTime: 0, errors: [] as string[]};
@@ -595,9 +913,18 @@ export function apply(ctx: Context, config: PluginConfig) {
 
             // === 性能统计变量 ===
             const startTotal = Date.now();
-            const sendStats: { downloadTime: number, sendTime: number, errors: string[] } = {downloadTime: 0, sendTime: 0, errors: []};
+            const sendStats: {
+                downloadTime: number,
+                sendTime: number,
+                errors: string[],
+                fileCacheHits?: number,
+                fileCacheMisses?: number
+            } = {
+                downloadTime: 0,
+                sendTime: 0,
+                errors: []
+            };
             let parseTime = 0;
-            let isCache = false;
             let status = "success";
             let errorMsg = "";
             let errorStack = "";
@@ -609,13 +936,12 @@ export function apply(ctx: Context, config: PluginConfig) {
             let optimisticTime = 0; // 记录乐观缓存的生成时间
 
             try {
-                // 1. 查持久化缓存 (DB)
+                // 1. 查解析时间线的最新节点
                 if (config.enableCache) {
-                    const cached = await ctx.database.get('sla_parse_cache', cacheKey);
-                    // 检查是否存在
-                    if (cached.length > 0) {
-                        const entry = cached[0];
-                        const ageMs = Date.now() - entry.created_at;
+                    const latestNode = await getLatestTimelineNode(ctx, config, cacheKey);
+                    if (latestNode) {
+                        const checkedAt = latestNode.last_checked_at || latestNode.created_at;
+                        const ageMs = Date.now() - checkedAt;
 
                         // 分别判断是否超过 L1 和 乐观缓存 时效
                         const isExpiredL1 = config.cacheExpiration > 0 && (ageMs > config.cacheExpiration * 60 * 60 * 1000);
@@ -623,17 +949,13 @@ export function apply(ctx: Context, config: PluginConfig) {
 
                         if (!isExpiredL1) {
                             logger.debug(`使用 L1 缓存解析结果: ${cacheKey}`);
-                            result = {...entry.data}; // 浅拷贝，避免修改污染原缓存对象
-                            const cacheTimeStr = new Date(entry.created_at).toLocaleString('zh-CN', {hour12: false});
-                            result.mainbody = (result.mainbody || '') + `\n\n[📦 正在使用 L1 缓存 | 缓存时间: ${cacheTimeStr}]`;
-                            isCache = true;
+                            result = {...latestNode.data}; // 浅拷贝，避免修改污染原缓存对象
+                            const cacheTimeStr = formatTime(checkedAt);
+                            result._cache = {...result._cache, parse: `L1 命中 | 缓存时间: ${cacheTimeStr}`};
                         } else if (config.optimisticCache && !isExpiredL2) {
                             logger.debug(`L1 缓存已过期，暂存乐观缓存备用: ${cacheKey}`);
-                            optimisticData = {...entry.data}; // 浅拷贝备用
-                            optimisticTime = entry.created_at;
-                        } else {
-                            // 彻底过期，删除
-                            await ctx.database.remove('sla_parse_cache', {key: cacheKey});
+                            optimisticData = {...latestNode.data}; // 浅拷贝备用
+                            optimisticTime = checkedAt;
                         }
                     }
                 }
@@ -647,7 +969,6 @@ export function apply(ctx: Context, config: PluginConfig) {
                             result = await pendingChecks.get(cacheKey) || null;
                             // 若合并任务返回的结果带有乐观缓存标记
                             if (result && (result as any)._isOptimisticFallback) {
-                                isCache = true;
                                 status = "optimistic_fallback";
                             }
                         } catch (e: any) {
@@ -661,10 +982,12 @@ export function apply(ctx: Context, config: PluginConfig) {
                             if (optimisticData) {
                                 logger.warn(`合并任务失败，触发乐观缓存回退: ${cacheKey} | Error: ${mergeErrDetail}`);
                                 result = optimisticData;
-                                const cacheTimeStr = new Date(optimisticTime).toLocaleString('zh-CN', {hour12: false});
-                                result.mainbody = (result.mainbody || '') + `\n\n[⚠️ 并发请求异常，回退 L2 乐观缓存 | 缓存时间: ${cacheTimeStr}]`;
+                                const cacheTimeStr = formatTime(optimisticTime);
+                                result._cache = {
+                                    ...result._cache,
+                                    parse: `L2 回退: 并发请求异常 | 缓存时间: ${cacheTimeStr}`
+                                };
                                 (result as any)._isOptimisticFallback = true;
-                                isCache = true;
                                 status = "optimistic_fallback";
                             } else {
                                 throw e;
@@ -681,8 +1004,11 @@ export function apply(ctx: Context, config: PluginConfig) {
                                 if (!res) {
                                     if (optimisticData) {
                                         logger.warn(`API 返回 null，触发乐观缓存回退: ${cacheKey}`);
-                                        const cacheTimeStr = new Date(optimisticTime).toLocaleString('zh-CN', {hour12: false});
-                                        optimisticData.mainbody = (optimisticData.mainbody || '') + `\n\n[⚠️ 解析数据为空，回退 L2 乐观缓存 | 缓存时间: ${cacheTimeStr}]`;
+                                        const cacheTimeStr = formatTime(optimisticTime);
+                                        optimisticData._cache = {
+                                            ...optimisticData._cache,
+                                            parse: `L2 回退: 解析数据为空 | 缓存时间: ${cacheTimeStr}`
+                                        };
                                         (optimisticData as any)._isOptimisticFallback = true;
                                         return optimisticData;
                                     }
@@ -691,11 +1017,12 @@ export function apply(ctx: Context, config: PluginConfig) {
 
                                 // 解析成功且开启缓存，则写入 DB，刷新缓存时间戳
                                 if (config.enableCache) {
-                                    await ctx.database.upsert('sla_parse_cache', [{
-                                        key: cacheKey,
-                                        data: res,
-                                        created_at: Date.now()
-                                    }]);
+                                    const cacheTime = Date.now();
+                                    await upsertTimelineIfChanged(ctx, config, cacheKey, res);
+                                    res._cache = {
+                                        ...res._cache,
+                                        parse: `未命中，已刷新 | 缓存时间: ${formatTime(cacheTime)}`
+                                    };
                                 }
                                 return res;
                             } catch (e: any) {
@@ -709,8 +1036,11 @@ export function apply(ctx: Context, config: PluginConfig) {
                                 // 抛出异常（网络错误/封禁）时触发乐观回退
                                 if (optimisticData) {
                                     logger.warn(`解析抛出异常，触发乐观缓存回退: ${cacheKey} | Error: ${errDetail}`);
-                                    const cacheTimeStr = new Date(optimisticTime).toLocaleString('zh-CN', {hour12: false});
-                                    optimisticData.mainbody = (optimisticData.mainbody || '') + `\n\n[⚠️ 接口触发异常，回退 L2 乐观缓存 | 缓存时间: ${cacheTimeStr}]`;
+                                    const cacheTimeStr = formatTime(optimisticTime);
+                                    optimisticData._cache = {
+                                        ...optimisticData._cache,
+                                        parse: `L2 回退: 接口异常 | 缓存时间: ${cacheTimeStr}`
+                                    };
                                     (optimisticData as any)._isOptimisticFallback = true;
                                     return optimisticData;
                                 }
@@ -730,7 +1060,6 @@ export function apply(ctx: Context, config: PluginConfig) {
                             result = await task;
                             // 识别最终是否使用了乐观缓存回退
                             if (result && (result as any)._isOptimisticFallback) {
-                                isCache = true;
                                 status = "optimistic_fallback";
                             }
                         } finally {
@@ -803,7 +1132,7 @@ export function apply(ctx: Context, config: PluginConfig) {
 
                     // === 3. 执行状态与缓存命中 ===
                     status: status, // success, failed, error, optimistic_fallback
-                    is_cache: isCache,
+                    is_cache: (sendStats.fileCacheHits || 0) > 0,
 
                     // === 4. 关键排障配置状态 ===
                     // 记录当时的运行配置，排查是否是特定模式下才报错（如本地下载+混合发送）

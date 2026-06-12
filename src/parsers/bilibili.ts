@@ -341,7 +341,7 @@ async function processVideo(ctx: Context, config: PluginConfig, link: Link, logg
                     // B站接口会返回精确的文件大小 size
                     if (durl.size && durl.size <= maxBytes) {
                         videoUrl = durl.url;
-                        logger.debug(`成功匹配合适清晰度 qn=${qn}，体积: ${(durl.size/1024/1024).toFixed(2)}MB`);
+                        logger.debug(`成功匹配合适清晰度 qn=${qn}，体积: ${(durl.size / 1024 / 1024).toFixed(2)}MB`);
                         break; // 满足限制，跳出循环
                     } else if (qn === qnList[qnList.length - 1]) {
                         // 如果已经是能给的最低画质却依然超限，只能交出去，让 utils.ts 去拦截并输出“超限提示”
@@ -349,7 +349,7 @@ async function processVideo(ctx: Context, config: PluginConfig, link: Link, logg
                         logger.debug(`B站视频即便降至最低画质 qn=${qn} 仍超限，交由底层拦截。`);
                     } else {
                         // 超限但还有降级空间
-                        logger.debug(`当前画质 qn=${qn} 超限 (${(durl.size/1024/1024).toFixed(2)}MB > ${config.Max_size}MB)，正在降级...`);
+                        logger.debug(`当前画质 qn=${qn} 超限 (${(durl.size / 1024 / 1024).toFixed(2)}MB > ${config.Max_size}MB)，正在降级...`);
                     }
                 } else {
                     break; // 接口异常，直接退出

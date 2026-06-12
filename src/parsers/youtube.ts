@@ -38,7 +38,7 @@ export async function match(content: string, ctx: Context, config: PluginConfig)
             const key = `${rule.type}:${id}`;
             if (seen.has(key)) continue;
             seen.add(key);
-            results.push({ platform: name, type: rule.type, id, url: `https://www.youtube.com/watch?v=${id}` });
+            results.push({platform: name, type: rule.type, id, url: `https://www.youtube.com/watch?v=${id}`});
         }
     }
     return results;

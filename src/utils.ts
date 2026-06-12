@@ -387,7 +387,8 @@ async function downloadAndMapUrl(
     localDownloadDir: string,
     onebotReadDir: string,
     logger: Logger,
-    enableCache: boolean
+    enableCache: boolean,
+    statsRef?: { fileCacheHits?: number, fileCacheMisses?: number }
 ): Promise<string> {
     await fs.promises.mkdir(localDownloadDir, {recursive: true});
 
@@ -405,6 +406,13 @@ async function downloadAndMapUrl(
                 if (fs.existsSync(cachedPath)) {
                     const filename = path.basename(cachedPath);
                     const onebotPath = path.posix.join(onebotReadDir, filename);
+                    await ctx.database.upsert('sla_file_cache', [{
+                        hash,
+                        path: cachedPath,
+                        url,
+                        created_at: Date.now()
+                    }]);
+                    if (statsRef) statsRef.fileCacheHits = (statsRef.fileCacheHits || 0) + 1;
                     logger.debug(`缓存命中: ${url} -> ${cachedPath}`);
                     return `file://${onebotPath}`;
                 } else {
@@ -432,6 +440,7 @@ async function downloadAndMapUrl(
             url,
             created_at: Date.now()
         }]);
+        if (statsRef) statsRef.fileCacheHits = (statsRef.fileCacheHits || 0) + 1;
         return fileUrl;
     }
 
@@ -450,7 +459,7 @@ async function downloadAndMapUrl(
             if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                 req.destroy();
                 logger.debug(`重定向: ${url} -> ${res.headers.location}`);
-                resolve(downloadAndMapUrl(ctx, res.headers.location, proxy, userAgent, localDownloadDir, onebotReadDir, logger, enableCache));
+                resolve(downloadAndMapUrl(ctx, res.headers.location, proxy, userAgent, localDownloadDir, onebotReadDir, logger, enableCache, statsRef));
                 return;
             }
 
@@ -488,6 +497,7 @@ async function downloadAndMapUrl(
                             logger.warn(`写入文件缓存数据库失败: ${dbErr}`);
                         }
                     }
+                    if (statsRef) statsRef.fileCacheMisses = (statsRef.fileCacheMisses || 0) + 1;
                     resolve(fileUrl);
                 })
                 .catch((err) => {
@@ -685,8 +695,24 @@ export async function sendResult(
     config: PluginConfig,
     result: ParsedInfo,
     logger: Logger,
-    statsRef: { downloadTime: number, sendTime: number, errors: string[] }
+    statsRef: {
+        downloadTime: number,
+        sendTime: number,
+        errors: string[],
+        fileCacheHits?: number,
+        fileCacheMisses?: number
+    }
 ): Promise<void> {
+    if (config.enableCache && config.usingLocal) {
+        const availability = await getLocalCacheAvailability(ctx, result);
+        if (availability.total > 0) {
+            result._cache = {
+                ...result._cache,
+                file: `命中 ${availability.hits}/${availability.total}`
+            };
+        }
+    }
+
     if (!session.channel) {
         await sendResult_plain(ctx, session, config, result, logger, statsRef);
         return;
@@ -704,13 +730,62 @@ export async function sendResult(
     }
 }
 
+function collectResultRemoteUrls(result: ParsedInfo): string[] {
+    const urls = new Set<string>();
+    if (result.coverUrl) urls.add(result.coverUrl);
+    if (result.mainbody) {
+        for (const match of result.mainbody.matchAll(/<img\s[^>]*src\s*=\s*["']?([^"'>\s]+)["']?/gi)) {
+            urls.add(match[1]);
+        }
+    }
+    if (Array.isArray(result.files)) {
+        for (const file of result.files) {
+            if (file?.url) urls.add(file.url);
+        }
+    }
+    return [...urls].filter(url => /^https?:\/\//i.test(url));
+}
+
+async function getLocalCacheAvailability(ctx: Context, result: ParsedInfo): Promise<{ total: number, hits: number }> {
+    const urls = collectResultRemoteUrls(result);
+    let hits = 0;
+    for (const url of urls) {
+        const hash = createHash('md5').update(url).digest('hex');
+        const cached = await ctx.database.get('sla_file_cache', hash);
+        if (cached.length > 0 && cached[0].path && fs.existsSync(cached[0].path)) {
+            hits++;
+        }
+    }
+    return {total: urls.length, hits};
+}
+
+function buildCachePlaceholder(result: ParsedInfo, statsRef: {
+    fileCacheHits?: number,
+    fileCacheMisses?: number
+}): string {
+    const lines: string[] = [];
+    if (result._cache?.parse) lines.push(`解析缓存: ${result._cache.parse}`);
+    if (result._cache?.file) {
+        lines.push(`文件缓存: ${result._cache.file}`);
+    } else if ((statsRef.fileCacheHits || 0) > 0 || (statsRef.fileCacheMisses || 0) > 0) {
+        lines.push(`文件缓存: 命中 ${statsRef.fileCacheHits || 0} / 新下载 ${statsRef.fileCacheMisses || 0}`);
+    }
+    return lines.join('\n');
+}
+
 export async function sendResult_plain(
     ctx: Context,
     session: Session,
     config: PluginConfig,
     result: ParsedInfo,
     logger: Logger,
-    statsRef: { downloadTime: number, sendTime: number, errors: string[] }
+    statsRef: {
+        downloadTime: number,
+        sendTime: number,
+        errors: string[],
+        fileCacheHits?: number,
+        fileCacheMisses?: number
+    }
 ): Promise<void> {
     logger.debug('进入普通发送');
 
@@ -731,7 +806,7 @@ export async function sendResult_plain(
         if (config.usingLocal) {
             const t = Date.now(); // 计时开始
             try {
-                mediaCoverUrl = await downloadAndMapUrl(ctx, result.coverUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
+                mediaCoverUrl = await downloadAndMapUrl(ctx, result.coverUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache, statsRef);
                 logger.debug(`封面已下载: ${mediaCoverUrl}`);
             } catch (e: any) {
                 logger.warn(`封面下载失败: ${result.coverUrl}`, e);
@@ -755,7 +830,7 @@ export async function sendResult_plain(
                 const remoteUrl = match[1];
                 if (config.usingLocal) {
                     try {
-                        const localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
+                        const localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache, statsRef);
                         urlMap[remoteUrl] = localUrl;
                         logger.debug(`正文图片已下载: ${localUrl}`);
                     } catch (e: any) {
@@ -784,6 +859,7 @@ export async function sendResult_plain(
     message = message.replace(/{sourceUrl}/g, escapeHtml(result.sourceUrl || ''));
     message = message.replace(/{cover}/g, mediaCoverUrl ? h.image(mediaCoverUrl).toString() : '');
     message = message.replace(/{stats}/g, escapeHtml(result.stats || ''));
+    message = message.replace(/{cache}/g, escapeHtml(buildCachePlaceholder(result, statsRef)));
 
     // 清理空行
     const cleanMessage = message.split('\n').filter(line => line.trim() !== '' || line.includes('<')).join('\n');
@@ -840,7 +916,7 @@ export async function sendResult_plain(
                     let localUrl = remoteUrl;
                     if (config.usingLocal) {
                         const t = Date.now();
-                        localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
+                        localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache, statsRef);
                         statsRef.downloadTime += Date.now() - t;
                     }
 
@@ -893,7 +969,13 @@ export async function sendResult_forward(
     result: ParsedInfo,
     logger: Logger,
     mixed_sending = false,
-    statsRef: { downloadTime: number, sendTime: number, errors: string[] }
+    statsRef: {
+        downloadTime: number,
+        sendTime: number,
+        errors: string[],
+        fileCacheHits?: number,
+        fileCacheMisses?: number
+    }
 ): Promise<void> {
     logger.debug(mixed_sending ? '进入混合发送' : '进入合并发送');
 
@@ -914,7 +996,7 @@ export async function sendResult_forward(
         if (config.usingLocal) {
             const t = Date.now();
             try {
-                mediaCoverUrl = await downloadAndMapUrl(ctx, result.coverUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
+                mediaCoverUrl = await downloadAndMapUrl(ctx, result.coverUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache, statsRef);
             } catch (e: any) {
                 logger.warn('封面下载失败', e);
                 statsRef.errors.push(`[Cover] ${e.message}`);
@@ -937,7 +1019,7 @@ export async function sendResult_forward(
                     try {
                         // 去重下载
                         if (!urlMap[url]) {
-                            urlMap[url] = await downloadAndMapUrl(ctx, url, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
+                            urlMap[url] = await downloadAndMapUrl(ctx, url, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache, statsRef);
                         }
                     } catch (e: any) {
                         logger.warn(`正文图片下载失败: ${url}`, e);
@@ -962,6 +1044,7 @@ export async function sendResult_forward(
     message = message.replace(/{authorName}/g, result.authorName || '');
     message = message.replace(/{sourceUrl}/g, result.sourceUrl || '');
     message = message.replace(/{stats}/g, result.stats || '');
+    message = message.replace(/{cache}/g, buildCachePlaceholder(result, statsRef));
 
     const lines = message.split('\n').filter(line => line.trim() !== '');
     const mainSegments: any[] = [];
@@ -1066,7 +1149,7 @@ export async function sendResult_forward(
                     let localUrl = remoteUrl;
                     if (config.usingLocal) {
                         const t = Date.now();
-                        localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache);
+                        localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache, statsRef);
                         statsRef.downloadTime += Date.now() - t;
                     }
                     if (!localUrl) continue;
