@@ -6,6 +6,21 @@ import {escapeHtml, expandShortLink, getCookie, numeral} from '../utils';
 
 export const name = "qqmusic";
 
+export function getFileCacheKey(url: string, songMid?: string): string | null {
+    try {
+        const u = new URL(url);
+        const filename = u.pathname.split('/').filter(Boolean).pop() || 'audio';
+        return songMid ? `qqmusic:${songMid}:${filename}` : `qqmusic:${filename}`;
+    } catch {
+        return songMid ? `qqmusic:${songMid}` : null;
+    }
+}
+
+function createQqMusicAudioFile(songMid: string, url: string): { type: 'audio', url: string, cacheKey?: string } {
+    const cacheKey = getFileCacheKey(url, songMid);
+    return cacheKey ? {type: 'audio', url, cacheKey} : {type: 'audio', url};
+}
+
 // 保存全局的 GUID
 let currentGuid: string = "";
 
@@ -270,7 +285,7 @@ export async function process(
             authorName: artist,
             mainbody: mainbody,
             coverUrl: coverUrl,
-            files: audioUrl ? [{type: 'audio', url: audioUrl}] : [],
+            files: audioUrl ? [createQqMusicAudioFile(realSongMid, audioUrl)] : [],
             sourceUrl: link.url,
             stats: statsString,
         };

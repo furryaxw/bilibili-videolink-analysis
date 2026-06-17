@@ -24,6 +24,7 @@ export interface ParsedInfo {
 export interface FileInfo {
     type: 'video' | 'audio' | 'generic'
     url: string;
+    cacheKey?: string;
 }
 
 export interface ParsedInfoCacheStatus {

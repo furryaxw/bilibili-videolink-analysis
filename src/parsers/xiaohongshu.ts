@@ -5,9 +5,23 @@ import {FileInfo, Link, ParsedInfo, PluginConfig, XhsInitialState} from '../type
 // @ts-ignore
 import {Cookie, Page} from 'puppeteer';
 import {load} from 'cheerio';
-import {escapeHtml, getCookie, numeral, expandShortLink} from '../utils';
+import {escapeHtml, expandShortLink, getCookie, numeral} from '../utils';
 
 export const name = "xiaohongshu";
+
+export function getFileCacheKey(url: string, noteId?: string): string | null {
+    try {
+        const u = new URL(url);
+        return noteId ? `xiaohongshu:${noteId}:${u.pathname}` : `xiaohongshu:${u.pathname}`;
+    } catch {
+        return noteId ? `xiaohongshu:${noteId}` : null;
+    }
+}
+
+function createXhsVideoFile(noteId: string, url: string): FileInfo {
+    const cacheKey = getFileCacheKey(url, noteId);
+    return cacheKey ? {type: 'video', url, cacheKey} : {type: 'video', url};
+}
 
 const linkRules = [
     {
@@ -278,7 +292,7 @@ export async function process(ctx: Context, config: PluginConfig, link: Link, se
 
         let files: FileInfo[] = [];
         if (videoUrl) {
-            files = [{type: "video", url: videoUrl}];
+            files = [createXhsVideoFile(link.id, videoUrl)];
         }
 
         return {

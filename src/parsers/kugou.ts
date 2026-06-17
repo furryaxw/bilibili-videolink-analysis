@@ -6,6 +6,21 @@ import {escapeHtml, expandShortLink} from '../utils';
 
 export const name = "kugou";
 
+export function getFileCacheKey(url: string, songHash?: string): string | null {
+    try {
+        const u = new URL(url);
+        const filename = u.pathname.split('/').filter(Boolean).pop() || 'audio';
+        return songHash ? `kugou:${songHash}:${filename}` : `kugou:${filename}`;
+    } catch {
+        return songHash ? `kugou:${songHash}` : null;
+    }
+}
+
+function createKugouAudioFile(songHash: string, url: string): { type: 'audio', url: string, cacheKey?: string } {
+    const cacheKey = getFileCacheKey(url, songHash);
+    return cacheKey ? {type: 'audio', url, cacheKey} : {type: 'audio', url};
+}
+
 const linkRules = [
     {
         // 匹配网页版/移动版常规链接中明文携带的 hash
@@ -165,7 +180,7 @@ export async function process(
             coverUrl: coverUrl,
             sourceUrl: link.url,
             stats: "",
-            files: audioUrl ? [{type: "audio", url: audioUrl}] : []
+            files: audioUrl ? [createKugouAudioFile(song_hash, audioUrl)] : []
         };
 
     } catch (error: any) {

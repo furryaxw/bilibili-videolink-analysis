@@ -18,6 +18,7 @@ interface ParserModule {
     match: (content: string, ctx: Context, config: PluginConfig) => Promise<Link[]>;
     init?: (ctx: Context, config: PluginConfig) => Promise<any> | any;
     lc_get_cookie?: (ctx: Context, config: PluginConfig) => Promise<string>;
+    getFileCacheKey?: (url: string, linkId?: string) => string | null;
     process: (ctx: Context, config: PluginConfig, link: Link, session: Session) => Promise<ParsedInfo | null>;
 
     [key: string]: any;

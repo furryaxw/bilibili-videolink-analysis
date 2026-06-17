@@ -6,6 +6,22 @@ import {escapeHtml, numeral} from '../utils';
 
 export const name = "youtube";
 
+function extractYoutubeItag(url: string): string {
+    try {
+        const outer = new URL(url);
+        const nested = outer.searchParams.get('video_url');
+        const target = nested ? new URL(nested) : outer;
+        return target.searchParams.get('itag') || 'unknown';
+    } catch {
+        return 'unknown';
+    }
+}
+
+export function getFileCacheKey(url: string, linkId?: string): string | null {
+    if (!linkId) return null;
+    return `youtube:${linkId}:itag:${extractYoutubeItag(url)}`;
+}
+
 // 匹配规则
 const linkRules = [
     {
@@ -83,7 +99,11 @@ export async function process(
             authorName: response.author,
             mainbody: escapeHtml(response.description),
             coverUrl: response.cover,
-            files: [{type: 'video', url: response.direct_url}],
+            files: [{
+                type: 'video',
+                url: response.direct_url,
+                cacheKey: getFileCacheKey(response.direct_url, link.id) || undefined
+            }],
             sourceUrl: videoUrl,
             stats: `观看: ${views} | 点赞: ${likes} | 评论: ${comments}`,
         };

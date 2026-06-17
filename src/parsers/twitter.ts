@@ -6,6 +6,20 @@ import {escapeHtml, expandShortLink, getEffectiveSettings, numeral} from '../uti
 
 export const name = "twitter";
 
+export function getFileCacheKey(url: string): string | null {
+    try {
+        const u = new URL(url);
+        return `twitter:${u.pathname}`;
+    } catch {
+        return null;
+    }
+}
+
+function createTwitterVideoFile(url: string): FileInfo {
+    const cacheKey = getFileCacheKey(url);
+    return cacheKey ? {type: 'video', url, cacheKey} : {type: 'video', url};
+}
+
 const linkRules = [
     {
         pattern: /https?:\/\/(?:www\.)?(?:twitter\.com|x\.com|mobile\.twitter\.com)\/[a-zA-Z0-9_]+\/status\/(\d+)\b/gi,
@@ -200,7 +214,7 @@ function extractTweetContent(data: any, config: PluginConfig) {
             // 兼容 url 和 src 字段
             const videoUrl = bestVariant.url || bestVariant.src;
             if (videoUrl) {
-                files.push({type: 'video', url: videoUrl});
+                files.push(createTwitterVideoFile(videoUrl));
                 // 如果还没有封面（例如没有图片），使用视频封面
             }
         }
@@ -229,7 +243,7 @@ function extractVxContent(data: any) {
             if (media.type === 'image') {
                 images.push(media.url);
             } else if (media.type === 'video' || media.type === 'gif') {
-                files.push({type: 'video', url: media.url});
+                files.push(createTwitterVideoFile(media.url));
                 if (!videoPoster && media.thumbnail_url) {
                     videoPoster = media.thumbnail_url;
                 }

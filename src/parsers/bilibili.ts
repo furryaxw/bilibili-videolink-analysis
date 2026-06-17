@@ -58,6 +58,20 @@ function md5(str: string) {
     return crypto.createHash('md5').update(str).digest('hex');
 }
 
+export function getFileCacheKey(url: string): string | null {
+    try {
+        const u = new URL(url);
+        return `bilibili:${u.pathname}`;
+    } catch {
+        return null;
+    }
+}
+
+function createBilibiliFile(url: string): FileInfo {
+    const cacheKey = getFileCacheKey(url);
+    return cacheKey ? {type: 'video', url, cacheKey} : {type: 'video', url};
+}
+
 async function getWbiKeys(ctx: Context, userAgent: string) {
     try {
         const res = await ctx.http.get('https://api.bilibili.com/x/web-interface/nav', {
@@ -362,7 +376,7 @@ async function processVideo(ctx: Context, config: PluginConfig, link: Link, logg
         const statsString = `播放: ${numeral(data.stat.view, config)} | 弹幕: ${numeral(data.stat.danmaku, config)}\n` +
             `点赞: ${numeral(data.stat.like, config)} | 硬币: ${numeral(data.stat.coin, config)} | 收藏: ${numeral(data.stat.favorite, config)}`;
 
-        const files: FileInfo[] = videoUrl ? [{type: "video", url: videoUrl}] : [];
+        const files: FileInfo[] = videoUrl ? [createBilibiliFile(videoUrl)] : [];
 
         return {
             platform: name,

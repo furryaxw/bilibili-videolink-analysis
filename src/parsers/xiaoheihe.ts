@@ -8,6 +8,20 @@ import {HTTPRequest, Page} from 'puppeteer'
 
 export const name = "xiaoheihe";
 
+export function getFileCacheKey(url: string, linkId?: string): string | null {
+    try {
+        const u = new URL(url);
+        return linkId ? `xiaoheihe:${linkId}:${u.pathname}` : `xiaoheihe:${u.pathname}`;
+    } catch {
+        return linkId ? `xiaoheihe:${linkId}` : null;
+    }
+}
+
+function createXiaoHeiheVideoFile(linkId: string, url: string): { type: 'video', url: string, cacheKey?: string } {
+    const cacheKey = getFileCacheKey(url, linkId);
+    return cacheKey ? {type: 'video', url, cacheKey} : {type: 'video', url};
+}
+
 const linkRules = [
     {
         pattern: /https?:\/\/api\.xiaoheihe\.cn\/v3\/bbs\/app\/api\/web\/share\?[^"'\s]*?\blink_id=([a-zA-Z0-9]+)/gi,
@@ -368,7 +382,7 @@ export async function process(
             sourceUrl: link.url,
             stats: status,
             coverUrl: postData.coverImage,
-            files: postData.videoUrl ? [{type: 'video', url: postData.videoUrl}] : []
+            files: postData.videoUrl ? [createXiaoHeiheVideoFile(link.id, postData.videoUrl)] : []
         };
     } catch (error) {
         logger.error('解析失败:', error)

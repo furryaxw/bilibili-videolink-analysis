@@ -2,15 +2,10 @@
 
 import {Context, Schema} from 'koishi';
 import {init, parsers, parsers_str, processLink, resolveLinks} from './core';
-import {ParsedInfo, PluginConfig, SlaParseCache, SlaParseTimelineNode} from './types';
-import {
-    buildTelemetryEndpoint,
-    getEffectiveSettings,
-    isUserAdmin,
-    sendResult,
-    syncCookiesFromCloud
-} from './utils';
+import {ParsedInfo, PluginConfig, SlaFileCache, SlaParseCache, SlaParseTimelineNode} from './types';
+import {buildTelemetryEndpoint, getEffectiveSettings, isUserAdmin, sendResult, syncCookiesFromCloud} from './utils';
 import * as fs from 'node:fs';
+import {createHash} from 'node:crypto';
 
 export const name = 'share-links-analysis';
 export const inject = {
@@ -52,10 +47,10 @@ export const Config: Schema<PluginConfig> = Schema.intersect([
 
     Schema.object({
         enableCache: Schema.boolean().default(true).description("开启缓存（包括解析结果缓存和资源文件缓存）"),
-        cacheExpiration: Schema.number().default(24).description("L1 缓存过期时间（小时）。设为 0 则不过期。"),
+        cacheExpiration: Schema.number().default(5).description("L1 缓存过期时间（小时）。设为 0 则不过期。"),
         optimisticCache: Schema.boolean().default(true).description("开启乐观缓存"),
-        optimisticExpiration: Schema.number().default(240).description("乐观缓存最大保留时间（小时）。设为 0 则不过期。"),
-        autoCleanInterval: Schema.number().default(1).description("自动清理过期缓存的检查间隔（小时）。"),
+        optimisticExpiration: Schema.number().default(0).description("乐观缓存最大保留时间（小时）。设为 0 则不过期。"),
+        autoCleanInterval: Schema.number().default(0).description("自动清理过期缓存的检查间隔（小时）。设为 0 则不检查缓存。"),
     }).description("缓存设置"),
 
     Schema.object({
@@ -165,13 +160,15 @@ function getRetentionThreshold(hours: number): number | null {
     return Date.now() - hours * 60 * 60 * 1000;
 }
 
-function normalizeForCompare(value: any): any {
-    if (Array.isArray(value)) return value.map(normalizeForCompare);
+function normalizeForCompare(value: any, keyName = ''): any {
+    if (Array.isArray(value)) return value.map(item => normalizeForCompare(item));
     if (value && typeof value === 'object') {
         const output: Record<string, any> = {};
         for (const key of Object.keys(value).sort()) {
             if (key.startsWith('_')) continue;
-            output[key] = normalizeForCompare(value[key]);
+            if (key === 'stats' || key === 'status') continue;
+            if (key === 'url' && typeof value.cacheKey === 'string') continue;
+            output[key] = normalizeForCompare(value[key], key);
         }
         return output;
     }
@@ -250,6 +247,334 @@ function formatTime(timestamp: number): string {
     return new Date(timestamp).toLocaleString('zh-CN', {hour12: false});
 }
 
+function md5Hex(value: string): string {
+    return createHash('md5').update(value).digest('hex');
+}
+
+function splitPlatformCacheKey(cacheKey: string): { platform: string, id: string } | null {
+    const index = cacheKey.indexOf(':');
+    if (index <= 0 || index >= cacheKey.length - 1) return null;
+    return {
+        platform: cacheKey.slice(0, index),
+        id: cacheKey.slice(index + 1)
+    };
+}
+
+function getParserFileCacheKey(platform: string, url: string, linkId?: string): string | null {
+    const parser = parsers.find(item => item.name === platform) as {
+        getFileCacheKey?: (url: string, linkId?: string) => string | null
+    } | undefined;
+    return parser?.getFileCacheKey?.(url, linkId) || null;
+}
+
+interface FileCacheRemap {
+    oldHash: string;
+    newHash: string;
+    url: string;
+    cacheKey: string;
+}
+
+interface TimelineFormatMigrationResult {
+    totalNodes: number;
+    keptNodes: number;
+    rewrittenNodes: number;
+    deltaUpdatedNodes: number;
+    deduplicatedNodes: number;
+    invalidCacheKeys: number;
+    fileCacheRemaps: FileCacheRemap[];
+}
+
+interface FileCacheFormatMigrationResult {
+    totalRows: number;
+    finalRows: number;
+    migratedRows: number;
+    mergedRows: number;
+    skippedRows: number;
+    missingRows: number;
+    conflictRows: number;
+}
+
+function isSameTimelineNodeRecord(a: SlaParseTimelineNode | undefined, b: SlaParseTimelineNode): boolean {
+    if (!a) return false;
+    return a.node_id === b.node_id
+        && a.cache_key === b.cache_key
+        && a.delta === b.delta
+        && a.created_at === b.created_at
+        && a.last_checked_at === b.last_checked_at
+        && JSON.stringify(a.data) === JSON.stringify(b.data);
+}
+
+function isSameFileCacheRecord(a: SlaFileCache | undefined, b: SlaFileCache): boolean {
+    if (!a) return false;
+    return a.hash === b.hash
+        && a.path === b.path
+        && a.url === b.url
+        && a.created_at === b.created_at;
+}
+
+function choosePreferredFileCacheRow(a: SlaFileCache, b: SlaFileCache): SlaFileCache {
+    const aExists = Boolean(a.path) && fs.existsSync(a.path);
+    const bExists = Boolean(b.path) && fs.existsSync(b.path);
+    if (aExists !== bExists) return aExists ? a : b;
+    return (a.created_at || 0) >= (b.created_at || 0) ? a : b;
+}
+
+function rewriteParsedInfoToCurrentCacheFormat(
+    node: SlaParseTimelineNode
+): {
+    data: ParsedInfo,
+    changed: boolean,
+    invalidCacheKey: boolean,
+    fileCacheRemaps: FileCacheRemap[],
+} {
+    const parts = splitPlatformCacheKey(node.cache_key);
+    const files = Array.isArray(node.data?.files) ? node.data.files : [];
+    if (files.length === 0) {
+        return {
+            data: node.data,
+            changed: false,
+            invalidCacheKey: !parts,
+            fileCacheRemaps: [],
+        };
+    }
+
+    let changed = false;
+    const remaps: FileCacheRemap[] = [];
+    const nextFiles = files.map(file => {
+        if (!file?.url || !parts) return file;
+
+        const nextCacheKey = getParserFileCacheKey(parts.platform, file.url, parts.id);
+        if (nextCacheKey) {
+            const oldHash = md5Hex(file.url);
+            const newHash = md5Hex(nextCacheKey);
+            if (oldHash !== newHash) {
+                remaps.push({
+                    oldHash,
+                    newHash,
+                    url: file.url,
+                    cacheKey: nextCacheKey,
+                });
+            }
+
+            if (file.cacheKey === nextCacheKey) return file;
+            changed = true;
+            return {...file, cacheKey: nextCacheKey};
+        }
+
+        if (typeof file.cacheKey === 'string') {
+            changed = true;
+            const {cacheKey, ...rest} = file;
+            return rest;
+        }
+
+        return file;
+    });
+
+    return {
+        data: changed ? {...node.data, files: nextFiles} : node.data,
+        changed,
+        invalidCacheKey: !parts,
+        fileCacheRemaps: remaps,
+    };
+}
+
+async function upsertTimelineNodesInBatches(ctx: Context, nodes: SlaParseTimelineNode[], batchSize = 200) {
+    for (let index = 0; index < nodes.length; index += batchSize) {
+        await ctx.database.upsert('sla_parse_timeline', nodes.slice(index, index + batchSize));
+    }
+}
+
+async function removeTimelineNodesById(ctx: Context, nodeIds: string[]) {
+    for (const nodeId of nodeIds) {
+        await ctx.database.remove('sla_parse_timeline', {node_id: nodeId});
+    }
+}
+
+async function upsertFileCacheRowsInBatches(ctx: Context, rows: SlaFileCache[], batchSize = 200) {
+    for (let index = 0; index < rows.length; index += batchSize) {
+        await ctx.database.upsert('sla_file_cache', rows.slice(index, index + batchSize));
+    }
+}
+
+async function removeFileCacheHashes(ctx: Context, hashes: string[]) {
+    for (const hash of hashes) {
+        await ctx.database.remove('sla_file_cache', {hash});
+    }
+}
+
+async function migrateTimelineCacheFormat(ctx: Context): Promise<TimelineFormatMigrationResult> {
+    const allNodes = await ctx.database.get('sla_parse_timeline', {}) as SlaParseTimelineNode[];
+    const groupedNodes = new Map<string, SlaParseTimelineNode[]>();
+    const originalById = new Map<string, SlaParseTimelineNode>();
+    const remapsByPair = new Map<string, FileCacheRemap>();
+
+    for (const node of allNodes) {
+        originalById.set(node.node_id, node);
+        const group = groupedNodes.get(node.cache_key) || [];
+        group.push(node);
+        groupedNodes.set(node.cache_key, group);
+    }
+
+    const nodesToUpsert: SlaParseTimelineNode[] = [];
+    const nodeIdsToRemove: string[] = [];
+    let rewrittenNodes = 0;
+    let deltaUpdatedNodes = 0;
+    let deduplicatedNodes = 0;
+    let invalidCacheKeys = 0;
+    let keptNodes = 0;
+
+    for (const nodes of groupedNodes.values()) {
+        const sortedNodes = [...nodes].sort((a, b) => {
+            if (a.created_at !== b.created_at) return a.created_at - b.created_at;
+            return a.node_id.localeCompare(b.node_id);
+        });
+
+        const keptGroup: SlaParseTimelineNode[] = [];
+        const keptByResult = new Map<string, SlaParseTimelineNode>();
+        for (const node of sortedNodes) {
+            const rewritten = rewriteParsedInfoToCurrentCacheFormat(node);
+            if (rewritten.invalidCacheKey) invalidCacheKeys++;
+            if (rewritten.changed) rewrittenNodes++;
+            for (const remap of rewritten.fileCacheRemaps) {
+                remapsByPair.set(`${remap.oldHash}->${remap.newHash}`, remap);
+            }
+
+            const candidate: SlaParseTimelineNode = rewritten.changed ? {...node, data: rewritten.data} : {...node};
+            const resultKey = stableStringify(candidate.data);
+            const sameKeptNode = keptByResult.get(resultKey);
+            if (sameKeptNode) {
+                sameKeptNode.last_checked_at = Math.max(
+                    sameKeptNode.last_checked_at || sameKeptNode.created_at,
+                    candidate.last_checked_at || candidate.created_at,
+                    candidate.created_at,
+                );
+                nodeIdsToRemove.push(candidate.node_id);
+                deduplicatedNodes++;
+                continue;
+            }
+
+            keptGroup.push(candidate);
+            keptByResult.set(resultKey, candidate);
+        }
+
+        for (let index = 0; index < keptGroup.length; index++) {
+            const previous = index === 0 ? null : keptGroup[index - 1].data;
+            const expectedDelta = previous ? buildParsedInfoDelta(previous, keptGroup[index].data) : 'base';
+            if (keptGroup[index].delta !== expectedDelta) {
+                keptGroup[index] = {...keptGroup[index], delta: expectedDelta};
+                deltaUpdatedNodes++;
+            }
+        }
+
+        keptNodes += keptGroup.length;
+        for (const node of keptGroup) {
+            if (!isSameTimelineNodeRecord(originalById.get(node.node_id), node)) {
+                nodesToUpsert.push(node);
+            }
+        }
+    }
+
+    await upsertTimelineNodesInBatches(ctx, nodesToUpsert);
+    await removeTimelineNodesById(ctx, nodeIdsToRemove);
+
+    return {
+        totalNodes: allNodes.length,
+        keptNodes,
+        rewrittenNodes,
+        deltaUpdatedNodes,
+        deduplicatedNodes,
+        invalidCacheKeys,
+        fileCacheRemaps: [...remapsByPair.values()],
+    };
+}
+
+async function migrateFileCacheFormat(ctx: Context, remaps: FileCacheRemap[]): Promise<FileCacheFormatMigrationResult> {
+    const allRows = await ctx.database.get('sla_file_cache', {}) as SlaFileCache[];
+    const originalRows = new Map<string, SlaFileCache>();
+    const finalRows = new Map<string, SlaFileCache>();
+
+    for (const row of allRows) {
+        originalRows.set(row.hash, row);
+        finalRows.set(row.hash, {...row});
+    }
+
+    let migratedRows = 0;
+    let mergedRows = 0;
+    let skippedRows = 0;
+    let missingRows = 0;
+    let conflictRows = 0;
+
+    for (const remap of remaps) {
+        if (remap.oldHash === remap.newHash) {
+            skippedRows++;
+            continue;
+        }
+
+        const sourceRow = finalRows.get(remap.oldHash);
+        const targetRow = finalRows.get(remap.newHash);
+
+        if (!sourceRow) {
+            if (targetRow) {
+                skippedRows++;
+            } else {
+                missingRows++;
+            }
+            continue;
+        }
+
+        if (!targetRow) {
+            finalRows.delete(remap.oldHash);
+            finalRows.set(remap.newHash, {
+                ...sourceRow,
+                hash: remap.newHash,
+                url: sourceRow.url || remap.url,
+            });
+            migratedRows++;
+            continue;
+        }
+
+        if (sourceRow.path && targetRow.path && sourceRow.path !== targetRow.path) {
+            conflictRows++;
+        }
+
+        const preferredRow = choosePreferredFileCacheRow(targetRow, sourceRow);
+        finalRows.set(remap.newHash, {
+            hash: remap.newHash,
+            path: preferredRow.path,
+            url: preferredRow.url || remap.url,
+            created_at: Math.max(targetRow.created_at || 0, sourceRow.created_at || 0),
+        });
+        finalRows.delete(remap.oldHash);
+        mergedRows++;
+    }
+
+    const rowsToUpsert: SlaFileCache[] = [];
+    const hashesToRemove: string[] = [];
+
+    for (const row of finalRows.values()) {
+        if (!isSameFileCacheRecord(originalRows.get(row.hash), row)) {
+            rowsToUpsert.push(row);
+        }
+    }
+
+    for (const hash of originalRows.keys()) {
+        if (!finalRows.has(hash)) hashesToRemove.push(hash);
+    }
+
+    await upsertFileCacheRowsInBatches(ctx, rowsToUpsert);
+    await removeFileCacheHashes(ctx, hashesToRemove);
+
+    return {
+        totalRows: allRows.length,
+        finalRows: finalRows.size,
+        migratedRows,
+        mergedRows,
+        skippedRows,
+        missingRows,
+        conflictRows,
+    };
+}
+
 function createTimelineNodeId(cacheKey: string, createdAt = Date.now()): string {
     const safeKey = cacheKey.replace(/[^a-zA-Z0-9_-]/g, '_');
     return `${safeKey}:${createdAt}:${Math.random().toString(36).slice(2, 8)}`;
@@ -271,8 +596,13 @@ async function getActiveTimelineNodes(ctx: Context, config: PluginConfig, cacheK
     return nodes.filter(node => isTimelineNodeActive(config, node));
 }
 
-async function touchTimelineNode(ctx: Context, node: SlaParseTimelineNode, checkedAt = Date.now()): Promise<SlaParseTimelineNode> {
-    const touched = {...node, last_checked_at: checkedAt};
+async function touchTimelineNode(
+    ctx: Context,
+    node: SlaParseTimelineNode,
+    checkedAt = Date.now(),
+    data?: ParsedInfo
+): Promise<SlaParseTimelineNode> {
+    const touched = {...node, data: data ?? node.data, last_checked_at: checkedAt};
     await ctx.database.upsert('sla_parse_timeline', [touched]);
     return touched;
 }
@@ -305,7 +635,7 @@ async function upsertTimelineIfChanged(
     const nodes = await getActiveTimelineNodes(ctx, config, cacheKey);
     const latest = nodes[nodes.length - 1];
     if (latest && isSameParsedInfo(latest.data, result)) {
-        return touchTimelineNode(ctx, latest);
+        return touchTimelineNode(ctx, latest, Date.now(), result);
     }
 
     const now = Date.now();
@@ -586,6 +916,27 @@ export function apply(ctx: Context, config: PluginConfig) {
             ].join('\n');
         });
 
+    cmd.subcommand('.migratecacheformat', '迁移解析/文件缓存到新 cacheKey 格式并合并重复节点', {authority: 4})
+        .action(async () => {
+            const timeline = await migrateTimelineCacheFormat(ctx);
+            const fileCache = await migrateFileCacheFormat(ctx, timeline.fileCacheRemaps);
+            return [
+                '缓存格式迁移完成。',
+                `时间线节点: ${timeline.totalNodes}`,
+                `保留节点: ${timeline.keptNodes}`,
+                `重写节点: ${timeline.rewrittenNodes}`,
+                `重算 delta: ${timeline.deltaUpdatedNodes}`,
+                `删除重复新节点: ${timeline.deduplicatedNodes}`,
+                `无效 cache_key 节点: ${timeline.invalidCacheKeys}`,
+                `文件缓存记录: ${fileCache.totalRows} -> ${fileCache.finalRows}`,
+                `文件缓存迁移: ${fileCache.migratedRows}`,
+                `文件缓存合并: ${fileCache.mergedRows}`,
+                `文件缓存已是新格式/跳过: ${fileCache.skippedRows}`,
+                `未找到旧文件缓存记录: ${fileCache.missingRows}`,
+                `文件路径冲突: ${fileCache.conflictRows}`,
+            ].join('\n');
+        });
+
     cmd.subcommand('.dropoldcache', '删除旧 sla_parse_cache 数据/表', {authority: 4})
         .action(async () => {
             return await dropLegacyParseCache(ctx);
@@ -684,6 +1035,25 @@ export function apply(ctx: Context, config: PluginConfig) {
             const sendStats = {downloadTime: 0, sendTime: 0, errors: [] as string[]};
             await sendResult(ctx, session, config, result, logger, sendStats);
             return;
+        });
+
+    cmd.subcommand('.forcecache <url:string>', '忽略缓存强制刷新缓存，不发送解析结果', {authority: 2})
+        .action(async ({session}, url) => {
+            if (!session) return '会话不可用。';
+            if (!config.enableCache) return '缓存功能未启用。';
+
+            const links = await resolveLinks(url, ctx, config);
+            if (links.length === 0) return '未在该链接中识别到支持的内容。';
+            const link = links[0];
+
+            if (config.waitTip_Switch) await session.send(config.waitTip_Switch);
+
+            const result = await processLink(ctx, config, link, session);
+            if (!result) return `解析失败: ${link.platform}/${link.type}:${link.id}`;
+
+            const cacheKey = `${link.platform}:${link.id}`;
+            const node = await upsertTimelineIfChanged(ctx, config, cacheKey, result);
+            return `缓存已强制刷新: ${cacheKey}\n时间: ${formatTime(node.last_checked_at || node.created_at)}`;
         });
 
     cmd.subcommand('.directlink <url:string> [quality:string]', '获取视频/音频直链', {authority: 1})

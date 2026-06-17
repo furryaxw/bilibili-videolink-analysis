@@ -6,6 +6,22 @@ import {escapeHtml, expandShortLink, numeral} from '../utils';
 
 export const name = "netease";
 
+export function getFileCacheKey(url: string, songId?: string): string | null {
+    try {
+        const u = new URL(url);
+        const segments = u.pathname.split('/').filter(Boolean);
+        const filename = segments[segments.length - 1] || 'audio';
+        return songId ? `netease:${songId}:${filename}` : `netease:${filename}`;
+    } catch {
+        return songId ? `netease:${songId}` : null;
+    }
+}
+
+function createNeteaseAudioFile(songId: string, url: string): { type: 'audio', url: string, cacheKey?: string } {
+    const cacheKey = getFileCacheKey(url, songId);
+    return cacheKey ? {type: 'audio', url, cacheKey} : {type: 'audio', url};
+}
+
 // 匹配分享出来的网易云音乐单曲链接
 const linkRules = [
     {
@@ -190,7 +206,7 @@ export async function process(
             authorName: authorName,
             mainbody: mainbody,
             coverUrl: coverUrl,
-            files: audioUrl ? [{type: 'audio', url: audioUrl}] : [],
+            files: audioUrl ? [createNeteaseAudioFile(targetSongId, audioUrl)] : [],
             sourceUrl: sourceUrl,
             stats: statsString,
         };

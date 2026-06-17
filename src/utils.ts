@@ -15,6 +15,52 @@ import {createHash} from 'crypto';
 import 'koishi-plugin-adapter-onebot';
 import {createDecipheriv} from "node:crypto";
 
+function md5Hex(value: string): string {
+    return createHash('md5').update(value).digest('hex');
+}
+
+function getFileCacheIdentity(url: string, cacheKey?: string): string {
+    return cacheKey || url;
+}
+
+function getFileCacheHash(url: string, cacheKey?: string): string {
+    return md5Hex(getFileCacheIdentity(url, cacheKey));
+}
+
+function getLegacyFileCacheHash(url: string): string {
+    return md5Hex(url);
+}
+
+function getFileCacheHashCandidates(url: string, cacheKey?: string): string[] {
+    return [...new Set([getFileCacheHash(url, cacheKey), getLegacyFileCacheHash(url)])];
+}
+
+async function findExistingFileCache(
+    ctx: Context,
+    url: string,
+    cacheKey?: string
+): Promise<{
+    canonicalHash: string,
+    matchedHash: string,
+    path: string
+} | null> {
+    const canonicalHash = getFileCacheHash(url, cacheKey);
+
+    for (const hash of getFileCacheHashCandidates(url, cacheKey)) {
+        const cached = await ctx.database.get('sla_file_cache', hash);
+        const cachedPath = cached[0]?.path;
+        if (!cachedPath) continue;
+
+        if (fs.existsSync(cachedPath)) {
+            return {canonicalHash, matchedHash: hash, path: cachedPath};
+        }
+
+        await ctx.database.remove('sla_file_cache', {hash});
+    }
+
+    return null;
+}
+
 // 平台域名映射配置
 const PLATFORM_DOMAINS = {
     'youtube': ['youtube.com', 'google.com'],
@@ -388,14 +434,36 @@ async function downloadAndMapUrl(
     onebotReadDir: string,
     logger: Logger,
     enableCache: boolean,
-    statsRef?: { fileCacheHits?: number, fileCacheMisses?: number }
+    statsRef?: { fileCacheHits?: number, fileCacheMisses?: number },
+    cacheKey?: string
 ): Promise<string> {
     await fs.promises.mkdir(localDownloadDir, {recursive: true});
 
     // 1. 计算 Hash
-    const hash = createHash('md5').update(url).digest('hex');
+    const hash = getFileCacheHash(url, cacheKey);
     const u = new URL(url);
     const ext = path.extname(u.pathname).split('?')[0] || '.bin';
+
+    if (enableCache) {
+        try {
+            const cached = await findExistingFileCache(ctx, url, cacheKey);
+            if (cached) {
+                const filename = path.basename(cached.path);
+                const onebotPath = path.posix.join(onebotReadDir, filename);
+                await ctx.database.upsert('sla_file_cache', [{
+                    hash: cached.canonicalHash,
+                    path: cached.path,
+                    url,
+                    created_at: Date.now()
+                }]);
+                if (statsRef) statsRef.fileCacheHits = (statsRef.fileCacheHits || 0) + 1;
+                logger.debug(`缓存命中: ${url} -> ${cached.path}`);
+                return `file://${onebotPath}`;
+            }
+        } catch (e) {
+            logger.warn(`读取文件缓存失败，将重新下载: ${e}`);
+        }
+    }
 
     // 如果开启缓存，先查库
     if (enableCache) {
@@ -459,7 +527,7 @@ async function downloadAndMapUrl(
             if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                 req.destroy();
                 logger.debug(`重定向: ${url} -> ${res.headers.location}`);
-                resolve(downloadAndMapUrl(ctx, res.headers.location, proxy, userAgent, localDownloadDir, onebotReadDir, logger, enableCache, statsRef));
+                resolve(downloadAndMapUrl(ctx, res.headers.location, proxy, userAgent, localDownloadDir, onebotReadDir, logger, enableCache, statsRef, cacheKey));
                 return;
             }
 
@@ -689,6 +757,10 @@ export async function isUserAdmin(session: Session, userId: string): Promise<boo
     }
 }
 
+function hasOneBotForwardSupport(session: Session): boolean {
+    return Boolean((session as any).onebot && typeof (session as any).onebot._request === 'function');
+}
+
 export async function sendResult(
     ctx: Context,
     session: Session,
@@ -717,6 +789,13 @@ export async function sendResult(
         await sendResult_plain(ctx, session, config, result, logger, statsRef);
         return;
     }
+
+    if ((config.useForward === 'forward' || config.useForward === 'mixed') && !hasOneBotForwardSupport(session)) {
+        logger.warn(`当前会话没有 OneBot forward API，${config.useForward} 模式回退到 plain。`);
+        await sendResult_plain(ctx, session, config, result, logger, statsRef);
+        return;
+    }
+
     switch (config.useForward) {
         case "plain":
             await sendResult_plain(ctx, session, config, result, logger, statsRef);
@@ -730,33 +809,46 @@ export async function sendResult(
     }
 }
 
-function collectResultRemoteUrls(result: ParsedInfo): string[] {
-    const urls = new Set<string>();
-    if (result.coverUrl) urls.add(result.coverUrl);
+function collectResultRemoteUrls(result: ParsedInfo): Array<{ url: string, cacheKey?: string }> {
+    const entries = new Map<string, { url: string, cacheKey?: string }>();
+    if (result.coverUrl) entries.set(`url:${result.coverUrl}`, {url: result.coverUrl});
     if (result.mainbody) {
         for (const match of result.mainbody.matchAll(/<img\s[^>]*src\s*=\s*["']?([^"'>\s]+)["']?/gi)) {
-            urls.add(match[1]);
+            entries.set(`url:${match[1]}`, {url: match[1]});
         }
     }
     if (Array.isArray(result.files)) {
         for (const file of result.files) {
-            if (file?.url) urls.add(file.url);
+            if (file?.url) {
+                const key = file.cacheKey ? `cache:${file.cacheKey}` : `url:${file.url}`;
+                entries.set(key, {url: file.url, cacheKey: file.cacheKey});
+            }
         }
     }
-    return [...urls].filter(url => /^https?:\/\//i.test(url));
+    return [...entries.values()].filter(entry => /^https?:\/\//i.test(entry.url));
 }
 
 async function getLocalCacheAvailability(ctx: Context, result: ParsedInfo): Promise<{ total: number, hits: number }> {
     const urls = collectResultRemoteUrls(result);
     let hits = 0;
-    for (const url of urls) {
-        const hash = createHash('md5').update(url).digest('hex');
-        const cached = await ctx.database.get('sla_file_cache', hash);
-        if (cached.length > 0 && cached[0].path && fs.existsSync(cached[0].path)) {
+    for (const entry of urls) {
+        if (await findExistingFileCache(ctx, entry.url, entry.cacheKey)) {
             hits++;
         }
     }
     return {total: urls.length, hits};
+}
+
+async function getCachedFileSize(ctx: Context, url: string, cacheKey?: string): Promise<number | null> {
+    const cached = await findExistingFileCache(ctx, url, cacheKey);
+    if (!cached) return null;
+
+    try {
+        const stat = await fs.promises.stat(cached.path);
+        return stat.size;
+    } catch {
+        return null;
+    }
 }
 
 function buildCachePlaceholder(result: ParsedInfo, statsRef: {
@@ -876,7 +968,7 @@ export async function sendResult_plain(
     // --- 发送 files 中的所有媒体（video/audio/generic）---
     if (Array.isArray(result.files)) {
         for (const file of result.files) {
-            const {type, url: remoteUrl} = file;
+            const {type, url: remoteUrl, cacheKey} = file;
             if (!['video', 'audio', 'generic'].includes(type)) continue;
 
             // 权限分离校验
@@ -893,7 +985,12 @@ export async function sendResult_plain(
             let shouldSend = true;
             if (config.Max_size !== undefined) {
                 const t = Date.now();
-                const sizeBytes = await getFileSize(remoteUrl, proxy, config.userAgent, logger);
+                let sizeBytes = config.usingLocal && config.enableCache
+                    ? await getCachedFileSize(ctx, remoteUrl, cacheKey)
+                    : null;
+                if (sizeBytes === null) {
+                    sizeBytes = await getFileSize(remoteUrl, proxy, config.userAgent, logger);
+                }
                 statsRef.downloadTime += Date.now() - t;
 
                 const maxBytes = config.Max_size * 1024 * 1024;
@@ -916,7 +1013,7 @@ export async function sendResult_plain(
                     let localUrl = remoteUrl;
                     if (config.usingLocal) {
                         const t = Date.now();
-                        localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache, statsRef);
+                        localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache, statsRef, cacheKey);
                         statsRef.downloadTime += Date.now() - t;
                     }
 
@@ -978,6 +1075,12 @@ export async function sendResult_forward(
     }
 ): Promise<void> {
     logger.debug(mixed_sending ? '进入混合发送' : '进入合并发送');
+
+    if (!hasOneBotForwardSupport(session)) {
+        logger.warn(`当前会话没有 OneBot forward API，${mixed_sending ? 'mixed' : 'forward'} 模式回退到 plain。`);
+        await sendResult_plain(ctx, session, config, result, logger, statsRef);
+        return;
+    }
 
     const localDownloadDir = config.localDownloadDir;
     const onebotReadDir = config.onebotReadDir;
@@ -1096,7 +1199,7 @@ export async function sendResult_forward(
 
     if (Array.isArray(result.files)) {
         for (const file of result.files) {
-            const {type, url: remoteUrl} = file;
+            const {type, url: remoteUrl, cacheKey} = file;
             if (!['video', 'audio', 'generic'].includes(type)) continue;
 
             // 权限分离校验
@@ -1112,7 +1215,12 @@ export async function sendResult_forward(
             let shouldInclude = true;
             if (config.Max_size !== undefined) {
                 const t = Date.now();
-                const sizeBytes = await getFileSize(remoteUrl, proxy, config.userAgent, logger);
+                let sizeBytes = config.usingLocal && config.enableCache
+                    ? await getCachedFileSize(ctx, remoteUrl, cacheKey)
+                    : null;
+                if (sizeBytes === null) {
+                    sizeBytes = await getFileSize(remoteUrl, proxy, config.userAgent, logger);
+                }
                 statsRef.downloadTime += Date.now() - t;
 
                 const maxBytes = config.Max_size * 1024 * 1024;
@@ -1149,7 +1257,7 @@ export async function sendResult_forward(
                     let localUrl = remoteUrl;
                     if (config.usingLocal) {
                         const t = Date.now();
-                        localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache, statsRef);
+                        localUrl = await downloadAndMapUrl(ctx, remoteUrl, proxy, config.userAgent, localDownloadDir, onebotReadDir, logger, config.enableCache, statsRef, cacheKey);
                         statsRef.downloadTime += Date.now() - t;
                     }
                     if (!localUrl) continue;
@@ -1230,12 +1338,11 @@ export async function sendResult_forward(
 
     logger.debug(`解析结果: \n ${JSON.stringify(result, null, 2)}`);
 
-    if (!(session.onebot && session.onebot._request)) throw new Error("Onebot is not defined");
-
     const promises: Promise<any>[] = [];
+    const onebot = (session as any).onebot;
 
     if (forwardNodes.length > 0) {
-        const forwardPromise = session.onebot._request('send_forward_msg', {
+        const forwardPromise = onebot._request('send_forward_msg', {
             group_id: session.guildId,
             messages: forwardNodes,
             news: [{text: mediaMainbody || '-'}, {text: '点击查看详情 | Powered by furryaxw'}],
