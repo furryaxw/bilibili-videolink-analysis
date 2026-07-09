@@ -785,11 +785,6 @@ export async function sendResult(
         }
     }
 
-    if (!session.channel) {
-        await sendResult_plain(ctx, session, config, result, logger, statsRef);
-        return;
-    }
-
     if ((config.useForward === 'forward' || config.useForward === 'mixed') && !hasOneBotForwardSupport(session)) {
         logger.warn(`当前会话没有 OneBot forward API，${config.useForward} 模式回退到 plain。`);
         await sendResult_plain(ctx, session, config, result, logger, statsRef);
@@ -1341,11 +1336,22 @@ export async function sendResult_forward(
     const promises: Promise<any>[] = [];
     const onebot = (session as any).onebot;
 
+    let sendTo: {}
+    if (session.channel) {
+        sendTo = {group_id: session.guildId}
+    } else {
+        sendTo = {user_id: session.userId}
+    }
+
     if (forwardNodes.length > 0) {
         const forwardPromise = onebot._request('send_forward_msg', {
-            group_id: session.guildId,
+            ...sendTo,
             messages: forwardNodes,
-            news: [{text: mediaMainbody || '-'}, {text: '点击查看详情 | Powered by furryaxw'}],
+            news: [
+                {text: mediaMainbody || '-'},
+                {text: '点击查看详情 | Powered by furryaxw'},
+                {text: result.sourceUrl || ''}
+            ],
             prompt: result.title || '',
             summary: '分享解析',
             source: result.title || ''
